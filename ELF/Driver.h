@@ -33,7 +33,7 @@ public:
   llvm::LLVMContext Context;      // to parse bitcode files
   std::unique_ptr<CpioFile> Cpio; // for reproduce
 
-private:
+protected:
   std::vector<MemoryBufferRef> getArchiveMembers(MemoryBufferRef MB);
   llvm::Optional<MemoryBufferRef> readFile(StringRef Path);
   void readConfigs(llvm::opt::InputArgList &Args);
