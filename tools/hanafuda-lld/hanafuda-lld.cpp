@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 //
 // This is the hanafuda entry point to the lld driver. It always sets up
-// an ELF linking flavor for generation .dol patch sections
+// an ELF linking flavor for generating .dol patch sections
 //
 //===----------------------------------------------------------------------===//
 

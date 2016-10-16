@@ -177,6 +177,13 @@ public:
   uint64_t Size;
 };
 
+enum class HanafudaSecType {
+  None,
+  Text,
+  Data,
+  Bss
+};
+
 // Regular defined symbols read from object file symbol tables.
 template <class ELFT> class DefinedRegular : public Defined {
   typedef typename ELFT::Sym Elf_Sym;
@@ -223,6 +230,10 @@ public:
 
   uintX_t Value;
   uintX_t Size;
+
+  // DOL Section when symbol is a Hanafuda base symbol
+  HanafudaSecType HanafudaType;
+  int HanafudaSection;
 
   // The input section this symbol belongs to. Notice that this is
   // a reference to a pointer. We are using two levels of indirections

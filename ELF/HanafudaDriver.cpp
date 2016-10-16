@@ -79,8 +79,11 @@ private:
       }
     }
   };
-  Section m_texts[7];
-  Section m_datas[11];
+  Section Texts[7];
+  Section Datas[11];
+  uint32_t BssAddr;
+  uint32_t BssSize;
+  uint32_t EntryPoint;
 
 public:
   DOLFile(MemoryBufferRef M) : MB(M) {
@@ -89,7 +92,7 @@ public:
 
     for (int i = 0; i < 7; ++i) {
       if (head.TextOffs[i]) {
-        Section& sec = m_texts[i];
+        Section& sec = Texts[i];
         sec.Offset = head.TextOffs[i];
         sec.Addr = head.TextLoads[i];
         sec.Length = head.TextSizes[i];
@@ -98,34 +101,100 @@ public:
 
     for (int i = 0; i < 11; ++i) {
       if (head.DataOffs[i]) {
-        Section& sec = m_datas[i];
+        Section& sec = Datas[i];
         sec.Offset = head.DataOffs[i];
         sec.Addr = head.DataLoads[i];
         sec.Length = head.DataSizes[i];
       }
     }
+
+    BssAddr = head.BssAddr;
+    BssSize = head.BssSize;
+    EntryPoint = head.EntryPoint;
   }
 
   int getUnusedTextSectionIndex() const {
     for (int i = 0; i < 7; ++i)
-      if (!m_texts[i].Offset)
+      if (!Texts[i].Offset)
         return i;
     return -1;
   }
 
   int getUnusedDataSectionIndex() const {
     for (int i = 0; i < 11; ++i)
-      if (!m_datas[i].Offset)
+      if (!Datas[i].Offset)
         return i;
     return -1;
   }
 
-  Section& getTextSection(int index) { return m_texts[index]; }
-  Section& getDataSection(int index) { return m_datas[index]; }
+  const Section& getTextSection(int index) const { return Texts[index]; }
+  const Section& getDataSection(int index) const { return Datas[index]; }
+
+  StringRef getTextSectionData(int index) const {
+    const Section& sec = getTextSection(index);
+    return MB.getBuffer().substr(sec.Offset, sec.Length);
+  }
+
+  StringRef getDataSectionData(int index) const {
+    const Section& sec = getDataSection(index);
+    return MB.getBuffer().substr(sec.Offset, sec.Length);
+  }
+
+  bool validateSymbolAddr(uint32_t addr, HanafudaSecType& secOut, int& secIdxOut) const {
+    for (int i = 0; i < 7; ++i) {
+      const Section& sec = getTextSection(i);
+      if (addr >= sec.Addr && addr < (sec.Addr + sec.Length)) {
+        secOut = HanafudaSecType::Text;
+        secIdxOut = i;
+        return false;
+      }
+    }
+    for (int i = 0; i < 11; ++i) {
+      const Section& sec = getDataSection(i);
+      if (addr >= sec.Addr && addr < (sec.Addr + sec.Length)) {
+        secOut = HanafudaSecType::Data;
+        secIdxOut = i;
+        return false;
+      }
+    }
+    if (addr >= BssAddr && addr < (BssAddr + BssSize)) {
+      secOut = HanafudaSecType::Bss;
+      return false;
+    }
+    return true;
+  }
+};
+
+class SymbolListFile {
+public:
+  using ListType = std::vector<std::pair<uint32_t, StringRef>>;
+private:
+  ListType List;
+public:
+  SymbolListFile(StringRef S) {
+    while (!S.empty()) {
+      // Split off each line in the file.
+      std::pair<StringRef, StringRef> lineAndRest = S.split('\n');
+      StringRef line = lineAndRest.first;
+      S = lineAndRest.second;
+      S = S.ltrim();
+
+      // Consume address and symbol name
+      uint32_t offset;
+      if (line.consumeInteger(0, offset))
+        continue;
+      line = line.ltrim().rtrim();
+      if (!line.empty())
+        List.emplace_back(offset, line);
+    }
+  }
+
+  ListType::const_iterator begin() const { return List.cbegin(); }
+  ListType::const_iterator end() const { return List.cend(); }
 };
 
 class LinkerDriver : public elf::LinkerDriver {
-  Optional<DOLFile> m_dolFile;
+  Optional<DOLFile> DolFile;
   void link(llvm::opt::InputArgList &Args);
 public:
   void main(ArrayRef<const char *> Args);
@@ -239,7 +308,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   // Read .dol to driver-owned buffer
   Optional<MemoryBufferRef> dolBuffer = readFile(dolArg);
   if (!dolBuffer.hasValue()) return;
-  m_dolFile.emplace(dolBuffer.getValue());
+  DolFile.emplace(dolBuffer.getValue());
 
   if (const char *Path = getReproduceOption(Args)) {
     // Note that --reproduce is a debug option so you can ignore it
@@ -270,6 +339,25 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
 void LinkerDriver::link(opt::InputArgList &Args) {
   SymbolTable<ELF32BE> Symtab;
   elf::Symtab<ELF32BE>::X = &Symtab;
+
+  // Load symbol list if provided and populate Symtab
+  if (Args.hasArg(OPT_hanafuda_dol_symbol_list)) {
+    StringRef dolListArg = Args.getLastArgValue(OPT_hanafuda_dol_symbol_list);
+    Optional<MemoryBufferRef> dolListBuffer = readFile(dolListArg);
+    if (dolListBuffer.hasValue()) {
+      SymbolListFile DolSymListFile(dolListBuffer.getValue().getBuffer());
+      for (const std::pair<uint32_t, StringRef>& sym : DolSymListFile) {
+        HanafudaSecType secType;
+        int secIdx = 0;
+        if (DolFile->validateSymbolAddr(sym.first, secType, secIdx))
+          continue;
+        DefinedRegular<ELF32BE> *asym = Symtab.addAbsolute(sym.second, llvm::ELF::STV_DEFAULT);
+        asym->HanafudaType = secType;
+        asym->HanafudaSection = secIdx;
+        asym->Value = sym.first;
+      }
+    }
+  }
 
   std::unique_ptr<TargetInfo> TI(createTarget());
   Target = TI.get();
