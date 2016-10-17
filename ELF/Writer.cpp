@@ -91,7 +91,7 @@ private:
 };
 } // anonymous namespace
 
-StringRef elf::getOutputSectionName(StringRef Name) {
+StringRef elf::getOutputSectionName(StringRef Name, BumpPtrAllocator &Alloc) {
   if (Config->Relocatable)
     return Name;
 
@@ -103,6 +103,11 @@ StringRef elf::getOutputSectionName(StringRef Name) {
     if (Name.startswith(V) || Name == Prefix)
       return Prefix;
   }
+
+  // ".zdebug_" is a prefix for ZLIB-compressed sections.
+  // Because we decompressed input sections, we want to remove 'z'.
+  if (Name.startswith(".zdebug_"))
+    return StringSaver(Alloc).save(Twine(".") + Name.substr(2));
   return Name;
 }
 
@@ -541,15 +546,15 @@ void PhdrEntry<ELFT>::add(OutputSectionBase<ELFT> *Sec) {
 }
 
 template <class ELFT>
-static Symbol *addOptionalSynthetic(StringRef Name,
-                                    OutputSectionBase<ELFT> *Sec,
-                                    typename ELFT::uint Val) {
+static Symbol *
+addOptionalSynthetic(StringRef Name, OutputSectionBase<ELFT> *Sec,
+                     typename ELFT::uint Val, uint8_t StOther = STV_HIDDEN) {
   SymbolBody *S = Symtab<ELFT>::X->find(Name);
   if (!S)
     return nullptr;
   if (!S->isUndefined() && !S->isShared())
     return S->symbol();
-  return Symtab<ELFT>::X->addSynthetic(Name, Sec, Val, STV_HIDDEN);
+  return Symtab<ELFT>::X->addSynthetic(Name, Sec, Val, StOther);
 }
 
 template <class ELFT>
@@ -699,7 +704,8 @@ template <class ELFT> void Writer<ELFT>::createSections() {
       }
       OutputSectionBase<ELFT> *Sec;
       bool IsNew;
-      std::tie(Sec, IsNew) = Factory.create(IS, getOutputSectionName(IS->Name));
+      StringRef OutsecName = getOutputSectionName(IS->Name, Alloc);
+      std::tie(Sec, IsNew) = Factory.create(IS, OutsecName);
       if (IsNew)
         OutputSections.push_back(Sec);
       Sec->addSection(IS);
@@ -968,15 +974,9 @@ void Writer<ELFT>::addStartStopSymbols(OutputSectionBase<ELFT> *Sec) {
   if (!isValidCIdentifier(S))
     return;
   StringSaver Saver(Alloc);
-  StringRef Start = Saver.save("__start_" + S);
-  StringRef Stop = Saver.save("__stop_" + S);
-  if (SymbolBody *B = Symtab<ELFT>::X->find(Start))
-    if (B->isUndefined())
-      Symtab<ELFT>::X->addSynthetic(Start, Sec, 0, B->getVisibility());
-  if (SymbolBody *B = Symtab<ELFT>::X->find(Stop))
-    if (B->isUndefined())
-      Symtab<ELFT>::X->addSynthetic(
-          Stop, Sec, DefinedSynthetic<ELFT>::SectionEnd, B->getVisibility());
+  addOptionalSynthetic(Saver.save("__start_" + S), Sec, 0, STV_DEFAULT);
+  addOptionalSynthetic(Saver.save("__stop_" + S), Sec,
+                       DefinedSynthetic<ELFT>::SectionEnd, STV_DEFAULT);
 }
 
 template <class ELFT>
@@ -1097,6 +1097,14 @@ std::vector<PhdrEntry<ELFT>> Writer<ELFT>::createPhdrs() {
     Hdr.add(Out<ELFT>::EhFrameHdr);
   }
 
+  // PT_OPENBSD_RANDOMIZE specifies the location and size of a part of the
+  // memory image of the program that must be filled with random data before any
+  // code in the object is executed.
+  if (OutputSectionBase<ELFT> *Sec = findSection(".openbsd.randomdata")) {
+    Phdr &Hdr = *AddHdr(PT_OPENBSD_RANDOMIZE, Sec->getPhdrFlags());
+    Hdr.add(Sec);
+  }
+
   // PT_ARM_EXIDX is the ARM EHABI equivalent of PT_GNU_EH_FRAME
   if (ARMExidx.First)
     Ret.push_back(std::move(ARMExidx));
@@ -1108,6 +1116,13 @@ std::vector<PhdrEntry<ELFT>> Writer<ELFT>::createPhdrs() {
     if (Config->ZStackSize != uint64_t(-1))
       Hdr.H.p_memsz = Config->ZStackSize;
   }
+
+  // PT_OPENBSD_WXNEEDED is a OpenBSD-specific header to mark the executable
+  // is expected to perform W^X violations, such as calling mprotect(2) or
+  // mmap(2) with PROT_WRITE | PROT_EXEC, which is prohibited by default on
+  // OpenBSD.
+  if (Config->ZWxneeded)
+    AddHdr(PT_OPENBSD_WXNEEDED, PF_X);
 
   if (Note.First)
     Ret.push_back(std::move(Note));
