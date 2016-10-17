@@ -292,7 +292,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   ELFOptTable Parser;
   opt::InputArgList Args = Parser.parse(ArgsArr.slice(1));
   if (Args.hasArg(OPT_help)) {
-    Parser.PrintHelp(outs(), ArgsArr[0], "hanafuda-lld", false);
+    Parser.PrintHelp(outs(), ArgsArr[0], "lld-hanafuda", false);
     return;
   }
   if (Args.hasArg(OPT_version))
@@ -300,7 +300,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
 
   // Ensure base .dol is provided
   if (!Args.hasArg(OPT_hanafuda_base_dol)) {
-    error(Twine("--hanafuda-base-dol=<dol-file> is a required argument of hanafuda-lld"));
+    error(Twine("--hanafuda-base-dol=<dol-file> is a required argument of lld-hanafuda"));
     return;
   }
   StringRef dolArg = Args.getLastArgValue(OPT_hanafuda_base_dol);

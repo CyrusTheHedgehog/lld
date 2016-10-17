@@ -95,7 +95,6 @@ endmacro(add_lld_library)
 
 add_subdirectory(lib)
 add_subdirectory(tools/lld)
-add_subdirectory(tools/hanafuda-lld)
 
 if (LLVM_INCLUDE_TESTS)
   add_subdirectory(test)
