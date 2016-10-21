@@ -385,7 +385,7 @@ Symbol *SymbolTable<ELFT>::addRegular(StringRef Name, const Elf_Sym &Sym,
                                     /*CanOmitFromDynSym*/ false,
                                     Section ? Section->getFile() : nullptr);
   int Cmp = compareDefinedNonCommon(S, WasInserted, Sym.getBinding());
-  if (Cmp > 0)
+  if (Cmp > 0 || replaceDefinedSymbolPreTrigger(S, Name))
     replaceBody<DefinedRegular<ELFT>>(S, Name, Sym, Section);
   else if (Cmp == 0)
     reportDuplicate(S->body(), Section->getFile());
@@ -400,7 +400,7 @@ Symbol *SymbolTable<ELFT>::addRegular(StringRef Name, uint8_t Binding,
   std::tie(S, WasInserted) = insert(Name, STT_NOTYPE, StOther & 3,
                                     /*CanOmitFromDynSym*/ false, nullptr);
   int Cmp = compareDefinedNonCommon(S, WasInserted, Binding);
-  if (Cmp > 0)
+  if (Cmp > 0 || replaceDefinedSymbolPreTrigger(S, Name))
     replaceBody<DefinedRegular<ELFT>>(S, Name, StOther);
   else if (Cmp == 0)
     reportDuplicate(S->body(), nullptr);
@@ -453,7 +453,7 @@ Symbol *SymbolTable<ELFT>::addBitcode(StringRef Name, uint8_t Binding,
   std::tie(S, WasInserted) =
       insert(Name, Type, StOther & 3, CanOmitFromDynSym, F);
   int Cmp = compareDefinedNonCommon(S, WasInserted, Binding);
-  if (Cmp > 0)
+  if (Cmp > 0 || replaceDefinedSymbolPreTrigger(S, Name))
     replaceBody<DefinedRegular<ELFT>>(S, Name, StOther, Type, F);
   else if (Cmp == 0)
     reportDuplicate(S->body(), F);

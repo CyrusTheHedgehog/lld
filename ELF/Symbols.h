@@ -232,7 +232,7 @@ public:
   uintX_t Size;
 
   // DOL Section when symbol is a Hanafuda base symbol
-  HanafudaSecType HanafudaType;
+  HanafudaSecType HanafudaType = HanafudaSecType::None;
   int HanafudaSection;
 
   // The input section this symbol belongs to. Notice that this is

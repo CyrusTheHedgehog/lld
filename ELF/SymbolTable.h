@@ -40,6 +40,8 @@ template <class ELFT> class SymbolTable {
   typedef typename ELFT::uint uintX_t;
 
 public:
+  virtual ~SymbolTable() = default;
+
   void addFile(InputFile *File);
   void addCombinedLtoObject();
 
@@ -132,6 +134,9 @@ private:
   llvm::DenseSet<StringRef> SoNames;
 
   std::unique_ptr<BitcodeCompiler> Lto;
+
+  // Overridden by Hanafuda to handle specialized code-patching triggers
+  virtual bool replaceDefinedSymbolPreTrigger(Symbol *S, StringRef Name) { return false; }
 };
 
 template <class ELFT> struct Symtab { static SymbolTable<ELFT> *X; };

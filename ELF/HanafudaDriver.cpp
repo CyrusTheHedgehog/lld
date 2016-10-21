@@ -334,10 +334,27 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   link(Args);
 }
 
+// Override symbol replace trigger to ensure .dol-sourced symbols are patched
+class HanafudaSymbolTable : public SymbolTable<ELF32BE> {
+  bool replaceDefinedSymbolPreTrigger(Symbol *S, StringRef Name) override {
+    SymbolBody *body = S->body();
+    if (body->isUndefined())
+      return false;
+    if (const auto *DR = dyn_cast<DefinedRegular<ELF32BE>>(body)) {
+      if (DR->HanafudaType == HanafudaSecType::Text) {
+
+      } else if (DR->HanafudaType == HanafudaSecType::Data) {
+
+      }
+    }
+    return false;
+  }
+};
+
 // Do actual linking. Note that when this function is called,
 // all linker scripts have already been parsed.
 void LinkerDriver::link(opt::InputArgList &Args) {
-  SymbolTable<ELF32BE> Symtab;
+  HanafudaSymbolTable Symtab;
   elf::Symtab<ELF32BE>::X = &Symtab;
 
   // Load symbol list if provided and populate Symtab
