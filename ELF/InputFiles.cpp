@@ -141,7 +141,7 @@ template <class ELFT> uint32_t elf::ObjectFile<ELFT>::getMipsGp0() const {
 }
 
 template <class ELFT>
-void elf::ObjectFile<ELFT>::parse(DenseSet<StringRef> &ComdatGroups) {
+void elf::ObjectFile<ELFT>::parse(DenseSet<CachedHashStringRef> &ComdatGroups) {
   // Read section and symbol tables.
   initializeSections(ComdatGroups);
   initializeSymbols();
@@ -227,7 +227,7 @@ bool elf::ObjectFile<ELFT>::shouldMerge(const Elf_Shdr &Sec) {
 
 template <class ELFT>
 void elf::ObjectFile<ELFT>::initializeSections(
-    DenseSet<StringRef> &ComdatGroups) {
+    DenseSet<CachedHashStringRef> &ComdatGroups) {
   uint64_t Size = this->ELFObj.getNumSections();
   Sections.resize(Size);
   unsigned I = -1;
@@ -248,7 +248,8 @@ void elf::ObjectFile<ELFT>::initializeSections(
     switch (Sec.sh_type) {
     case SHT_GROUP:
       Sections[I] = &InputSection<ELFT>::Discarded;
-      if (ComdatGroups.insert(getShtGroupSignature(Sec)).second)
+      if (ComdatGroups.insert(CachedHashStringRef(getShtGroupSignature(Sec)))
+              .second)
         continue;
       for (uint32_t SecIndex : getShtGroupEntries(Sec)) {
         if (SecIndex >= Size)
@@ -321,6 +322,9 @@ elf::ObjectFile<ELFT>::createInputSection(const Elf_Shdr &Sec) {
     // they can be used to reason about object compatibility.
     return &InputSection<ELFT>::Discarded;
   case SHT_MIPS_REGINFO:
+    if (MipsReginfo)
+      fatal(getFilename(this) +
+            ": multiple SHT_MIPS_REGINFO sections are not allowed");
     MipsReginfo.reset(new MipsReginfoInputSection<ELFT>(this, &Sec, Name));
     return MipsReginfo.get();
   case SHT_MIPS_OPTIONS:
@@ -330,6 +334,9 @@ elf::ObjectFile<ELFT>::createInputSection(const Elf_Shdr &Sec) {
     MipsOptions.reset(new MipsOptionsInputSection<ELFT>(this, &Sec, Name));
     return MipsOptions.get();
   case SHT_MIPS_ABIFLAGS:
+    if (MipsAbiFlags)
+      fatal(getFilename(this) +
+            ": multiple SHT_MIPS_ABIFLAGS sections are not allowed");
     MipsAbiFlags.reset(new MipsAbiFlagsInputSection<ELFT>(this, &Sec, Name));
     return MipsAbiFlags.get();
   case SHT_RELA:
@@ -687,7 +694,8 @@ static uint8_t mapVisibility(GlobalValue::VisibilityTypes GvVisibility) {
 }
 
 template <class ELFT>
-static Symbol *createBitcodeSymbol(const DenseSet<const Comdat *> &KeptComdats,
+static Symbol *createBitcodeSymbol(DenseSet<CachedHashStringRef> &KeptComdats,
+                                   DenseSet<CachedHashStringRef> &ComdatGroups,
                                    const lto::InputFile::Symbol &ObjSym,
                                    StringSaver &Saver, BitcodeFile *F) {
   StringRef NameRef = Saver.save(ObjSym.getName());
@@ -698,10 +706,22 @@ static Symbol *createBitcodeSymbol(const DenseSet<const Comdat *> &KeptComdats,
   uint8_t Visibility = mapVisibility(ObjSym.getVisibility());
   bool CanOmitFromDynSym = ObjSym.canBeOmittedFromSymbolTable();
 
-  if (const Comdat *C = check(ObjSym.getComdat()))
-    if (!KeptComdats.count(C))
+  StringRef C = check(ObjSym.getComdat());
+  if (!C.empty()) {
+    auto CH = CachedHashStringRef(C);
+    bool Keep = KeptComdats.count(CH);
+    if (!Keep) {
+      StringRef N = Saver.save(C);
+      CachedHashStringRef NH(N, CH.hash());
+      if (ComdatGroups.insert(NH).second) {
+        Keep = true;
+        KeptComdats.insert(NH);
+      }
+    }
+    if (!Keep)
       return Symtab<ELFT>::X->addUndefined(NameRef, Binding, Visibility, Type,
                                            CanOmitFromDynSym, F);
+  }
 
   if (Flags & BasicSymbolRef::SF_Undefined)
     return Symtab<ELFT>::X->addUndefined(NameRef, Binding, Visibility, Type,
@@ -717,7 +737,7 @@ static Symbol *createBitcodeSymbol(const DenseSet<const Comdat *> &KeptComdats,
 }
 
 template <class ELFT>
-void BitcodeFile::parse(DenseSet<StringRef> &ComdatGroups) {
+void BitcodeFile::parse(DenseSet<CachedHashStringRef> &ComdatGroups) {
 
   // Here we pass a new MemoryBufferRef which is identified by ArchiveName
   // (the fully resolved path of the archive) + member name + offset of the
@@ -730,16 +750,10 @@ void BitcodeFile::parse(DenseSet<StringRef> &ComdatGroups) {
   Obj = check(lto::InputFile::create(MemoryBufferRef(
       MB.getBuffer(), Saver.save(ArchiveName + MB.getBufferIdentifier() +
                                  utostr(OffsetInArchive)))));
-  DenseSet<const Comdat *> KeptComdats;
-  for (const auto &P : Obj->getComdatSymbolTable()) {
-    StringRef N = Saver.save(P.first());
-    if (ComdatGroups.insert(N).second)
-      KeptComdats.insert(&P.second);
-  }
-
+  DenseSet<CachedHashStringRef> KeptComdats;
   for (const lto::InputFile::Symbol &ObjSym : Obj->symbols())
-    Symbols.push_back(
-        createBitcodeSymbol<ELFT>(KeptComdats, ObjSym, Saver, this));
+    Symbols.push_back(createBitcodeSymbol<ELFT>(KeptComdats, ComdatGroups,
+                                                ObjSym, Saver, this));
 }
 
 template <template <class> class T>
@@ -770,48 +784,12 @@ static InputFile *createELFFile(MemoryBufferRef MB) {
 // Wraps a binary blob with an ELF header and footer
 // so that we can link it as a regular ELF file.
 template <class ELFT> InputFile *BinaryFile::createELF() {
-  // Fill the ELF file header.
-  ELFCreator<ELFT> ELF(ET_REL, Config->EMachine);
-  auto DataSec = ELF.addSection(".data");
-  DataSec.Header->sh_flags = SHF_ALLOC;
-  DataSec.Header->sh_size = MB.getBufferSize();
-  DataSec.Header->sh_type = SHT_PROGBITS;
-  DataSec.Header->sh_addralign = 8;
+  ArrayRef<uint8_t> Blob((uint8_t *)MB.getBufferStart(), MB.getBufferSize());
+  StringRef Filename = MB.getBufferIdentifier();
+  Buffer = wrapBinaryWithElfHeader<ELFT>(Blob, Filename);
 
-  // Replace non-alphanumeric characters with '_'.
-  std::string Filepath = MB.getBufferIdentifier();
-  std::transform(Filepath.begin(), Filepath.end(), Filepath.begin(),
-                 [](char C) { return isalnum(C) ? C : '_'; });
-
-  // Add _start, _end and _size symbols.
-  std::string StartSym = "_binary_" + Filepath + "_start";
-  auto SSym = ELF.addSymbol(StartSym);
-  SSym.Sym->setBindingAndType(STB_GLOBAL, STT_OBJECT);
-  SSym.Sym->st_shndx = DataSec.Index;
-
-  std::string EndSym = "_binary_" + Filepath + "_end";
-  auto ESym = ELF.addSymbol(EndSym);
-  ESym.Sym->setBindingAndType(STB_GLOBAL, STT_OBJECT);
-  ESym.Sym->st_shndx = DataSec.Index;
-  ESym.Sym->st_value = MB.getBufferSize();
-
-  std::string SizeSym = "_binary_" + Filepath + "_size";
-  auto SZSym = ELF.addSymbol(SizeSym);
-  SZSym.Sym->setBindingAndType(STB_GLOBAL, STT_OBJECT);
-  SZSym.Sym->st_shndx = SHN_ABS;
-  SZSym.Sym->st_value = MB.getBufferSize();
-
-  // Fix the ELF file layout and write it down to ELFData uint8_t vector.
-  std::size_t Size = ELF.layout();
-  ELFData.resize(Size);
-  ELF.write(ELFData.data());
-
-  // Fill .data section with actual data.
-  std::copy(MB.getBufferStart(), MB.getBufferEnd(),
-            ELFData.data() + DataSec.Header->sh_offset);
-
-  return createELFFile<ObjectFile>(MemoryBufferRef(
-      StringRef((char *)ELFData.data(), Size), MB.getBufferIdentifier()));
+  return createELFFile<ObjectFile>(
+      MemoryBufferRef(toStringRef(Buffer), Filename));
 }
 
 static bool isBitcode(MemoryBufferRef MB) {
@@ -897,10 +875,10 @@ template void ArchiveFile::parse<ELF32BE>();
 template void ArchiveFile::parse<ELF64LE>();
 template void ArchiveFile::parse<ELF64BE>();
 
-template void BitcodeFile::parse<ELF32LE>(DenseSet<StringRef> &);
-template void BitcodeFile::parse<ELF32BE>(DenseSet<StringRef> &);
-template void BitcodeFile::parse<ELF64LE>(DenseSet<StringRef> &);
-template void BitcodeFile::parse<ELF64BE>(DenseSet<StringRef> &);
+template void BitcodeFile::parse<ELF32LE>(DenseSet<CachedHashStringRef> &);
+template void BitcodeFile::parse<ELF32BE>(DenseSet<CachedHashStringRef> &);
+template void BitcodeFile::parse<ELF64LE>(DenseSet<CachedHashStringRef> &);
+template void BitcodeFile::parse<ELF64BE>(DenseSet<CachedHashStringRef> &);
 
 template void LazyObjectFile::parse<ELF32LE>();
 template void LazyObjectFile::parse<ELF32BE>();

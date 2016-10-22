@@ -240,7 +240,7 @@ LinkerScript<ELFT>::createInputSectionList(OutputSectionCommand &OutCmd) {
   }
 
   // After we created final list we should now set OutSec pointer to null,
-  // instead of -1. Otherwise we may get a crash when writing relocs, in 
+  // instead of -1. Otherwise we may get a crash when writing relocs, in
   // case section is discarded by linker script
   for (InputSectionBase<ELFT> *S : Ret)
     S->OutSec = nullptr;
@@ -652,7 +652,16 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
       std::find_if(Phdrs.begin(), Phdrs.end(), [](const PhdrEntry<ELFT> &E) {
         return E.H.p_type == PT_LOAD;
       });
+
   if (HeaderSize <= MinVA && FirstPTLoad != Phdrs.end()) {
+    // If linker script specifies program headers and first PT_LOAD doesn't 
+    // have both PHDRS and FILEHDR attributes then do nothing
+    if (!Opt.PhdrsCommands.empty()) {
+      size_t SegNum = std::distance(Phdrs.begin(), FirstPTLoad);
+      if (!Opt.PhdrsCommands[SegNum].HasPhdrs ||
+          !Opt.PhdrsCommands[SegNum].HasFilehdr)
+        return;
+    }
     // ELF and Program headers need to be right before the first section in
     // memory. Set their addresses accordingly.
     MinVA = alignDown(MinVA - HeaderSize, Target->PageSize);
@@ -682,6 +691,7 @@ std::vector<PhdrEntry<ELFT>> LinkerScript<ELFT>::createPhdrs() {
 
   // Process PHDRS and FILEHDR keywords because they are not
   // real output sections and cannot be added in the following loop.
+  std::vector<size_t> DefPhdrIds;
   for (const PhdrsCommand &Cmd : Opt.PhdrsCommands) {
     Ret.emplace_back(Cmd.Type, Cmd.Flags == UINT_MAX ? PF_R : Cmd.Flags);
     PhdrEntry<ELFT> &Phdr = Ret.back();
@@ -695,33 +705,33 @@ std::vector<PhdrEntry<ELFT>> LinkerScript<ELFT>::createPhdrs() {
       Phdr.H.p_paddr = Cmd.LMAExpr(0);
       Phdr.HasLMA = true;
     }
+
+    // If output section command doesn't specify any segments,
+    // and we haven't previously assigned any section to segment,
+    // then we simply assign section to the very first load segment.
+    // Below is an example of such linker script:
+    // PHDRS { seg PT_LOAD; }
+    // SECTIONS { .aaa : { *(.aaa) } }
+    if (DefPhdrIds.empty() && Phdr.H.p_type == PT_LOAD)
+      DefPhdrIds.push_back(Ret.size() - 1);
   }
 
   // Add output sections to program headers.
-  PhdrEntry<ELFT> *Load = nullptr;
-  uintX_t Flags = PF_R;
   for (OutputSectionBase<ELFT> *Sec : *OutputSections) {
     if (!(Sec->getFlags() & SHF_ALLOC))
       break;
 
     std::vector<size_t> PhdrIds = getPhdrIndices(Sec->getName());
-    if (!PhdrIds.empty()) {
-      // Assign headers specified by linker script
-      for (size_t Id : PhdrIds) {
-        Ret[Id].add(Sec);
-        if (Opt.PhdrsCommands[Id].Flags == UINT_MAX)
-          Ret[Id].H.p_flags |= Sec->getPhdrFlags();
-      }
-    } else {
-      // If we have no load segment or flags've changed then we want new load
-      // segment.
-      uintX_t NewFlags = Sec->getPhdrFlags();
-      if (Load == nullptr || Flags != NewFlags) {
-        Load = &*Ret.emplace(Ret.end(), PT_LOAD, NewFlags);
-        Flags = NewFlags;
-      }
-      Load->add(Sec);
+    if (PhdrIds.empty())
+      PhdrIds = std::move(DefPhdrIds);
+
+    // Assign headers specified by linker script
+    for (size_t Id : PhdrIds) {
+      Ret[Id].add(Sec);
+      if (Opt.PhdrsCommands[Id].Flags == UINT_MAX)
+        Ret[Id].H.p_flags |= Sec->getPhdrFlags();
     }
+    DefPhdrIds = std::move(PhdrIds);
   }
   return Ret;
 }
@@ -955,7 +965,7 @@ void ScriptParser::readVersionScript() {
 }
 
 void ScriptParser::readVersionScriptCommand() {
-  if (skip("{")) {
+  if (consume("{")) {
     readVersionDeclaration("");
     return;
   }
@@ -1018,10 +1028,10 @@ void ScriptParser::readLinkerScript() {
 
 void ScriptParser::addFile(StringRef S) {
   if (IsUnderSysroot && S.startswith("/")) {
-    SmallString<128> Path;
-    (Config->Sysroot + S).toStringRef(Path);
+    SmallString<128> PathData;
+    StringRef Path = (Config->Sysroot + S).toStringRef(PathData);
     if (sys::fs::exists(Path)) {
-      Driver->addFile(Saver.save(Path.str()));
+      Driver->addFile(Saver.save(Path));
       return;
     }
   }
@@ -1050,7 +1060,7 @@ void ScriptParser::readAsNeeded() {
   expect("(");
   bool Orig = Config->AsNeeded;
   Config->AsNeeded = true;
-  while (!Error && !skip(")"))
+  while (!Error && !consume(")"))
     addFile(unquote(next()));
   Config->AsNeeded = Orig;
 }
@@ -1066,13 +1076,13 @@ void ScriptParser::readEntry() {
 
 void ScriptParser::readExtern() {
   expect("(");
-  while (!Error && !skip(")"))
+  while (!Error && !consume(")"))
     Config->Undefined.push_back(next());
 }
 
 void ScriptParser::readGroup() {
   expect("(");
-  while (!Error && !skip(")")) {
+  while (!Error && !consume(")")) {
     StringRef Tok = next();
     if (Tok == "AS_NEEDED")
       readAsNeeded();
@@ -1106,14 +1116,14 @@ void ScriptParser::readOutput() {
 void ScriptParser::readOutputArch() {
   // Error checking only for now.
   expect("(");
-  next();
+  skip();
   expect(")");
 }
 
 void ScriptParser::readOutputFormat() {
   // Error checking only for now.
   expect("(");
-  next();
+  skip();
   StringRef Tok = next();
   if (Tok == ")")
     return;
@@ -1121,15 +1131,15 @@ void ScriptParser::readOutputFormat() {
     setError("unexpected token: " + Tok);
     return;
   }
-  next();
+  skip();
   expect(",");
-  next();
+  skip();
   expect(")");
 }
 
 void ScriptParser::readPhdrs() {
   expect("{");
-  while (!Error && !skip("}")) {
+  while (!Error && !consume("}")) {
     StringRef Tok = next();
     Opt.PhdrsCommands.push_back(
         {Tok, PT_NULL, false, false, UINT_MAX, nullptr});
@@ -1169,7 +1179,7 @@ void ScriptParser::readSearchDir() {
 void ScriptParser::readSections() {
   Opt.HasSections = true;
   expect("{");
-  while (!Error && !skip("}")) {
+  while (!Error && !consume("}")) {
     StringRef Tok = next();
     BaseCommand *Cmd = readProvideOrAssignment(Tok, true);
     if (!Cmd) {
@@ -1194,19 +1204,19 @@ static int precedence(StringRef Op) {
 
 Regex ScriptParser::readFilePatterns() {
   std::vector<StringRef> V;
-  while (!Error && !skip(")"))
+  while (!Error && !consume(")"))
     V.push_back(next());
   return compileGlobPatterns(V);
 }
 
 SortSectionPolicy ScriptParser::readSortKind() {
-  if (skip("SORT") || skip("SORT_BY_NAME"))
+  if (consume("SORT") || consume("SORT_BY_NAME"))
     return SortSectionPolicy::Name;
-  if (skip("SORT_BY_ALIGNMENT"))
+  if (consume("SORT_BY_ALIGNMENT"))
     return SortSectionPolicy::Alignment;
-  if (skip("SORT_BY_INIT_PRIORITY"))
+  if (consume("SORT_BY_INIT_PRIORITY"))
     return SortSectionPolicy::Priority;
-  if (skip("SORT_NONE"))
+  if (consume("SORT_NONE"))
     return SortSectionPolicy::None;
   return SortSectionPolicy::Default;
 }
@@ -1222,7 +1232,7 @@ std::vector<SectionPattern> ScriptParser::readInputSectionsList() {
   std::vector<SectionPattern> Ret;
   while (!Error && peek() != ")") {
     Regex ExcludeFileRe;
-    if (skip("EXCLUDE_FILE")) {
+    if (consume("EXCLUDE_FILE")) {
       expect("(");
       ExcludeFileRe = readFilePatterns();
     }
@@ -1249,7 +1259,7 @@ InputSectionDescription *
 ScriptParser::readInputSectionRules(StringRef FilePattern) {
   auto *Cmd = new InputSectionDescription(FilePattern);
   expect("(");
-  while (!HasError && !skip(")")) {
+  while (!HasError && !consume(")")) {
     SortSectionPolicy Outer = readSortKind();
     SortSectionPolicy Inner = SortSectionPolicy::Default;
     std::vector<SectionPattern> V;
@@ -1336,21 +1346,21 @@ ScriptParser::readOutputSectionDescription(StringRef OutSec) {
 
   expect(":");
 
-  if (skip("AT"))
+  if (consume("AT"))
     Cmd->LMAExpr = readParenExpr();
-  if (skip("ALIGN"))
+  if (consume("ALIGN"))
     Cmd->AlignExpr = readParenExpr();
-  if (skip("SUBALIGN"))
+  if (consume("SUBALIGN"))
     Cmd->SubalignExpr = readParenExpr();
 
   // Parse constraints.
-  if (skip("ONLY_IF_RO"))
+  if (consume("ONLY_IF_RO"))
     Cmd->Constraint = ConstraintKind::ReadOnly;
-  if (skip("ONLY_IF_RW"))
+  if (consume("ONLY_IF_RW"))
     Cmd->Constraint = ConstraintKind::ReadWrite;
   expect("{");
 
-  while (!Error && !skip("}")) {
+  while (!Error && !consume("}")) {
     StringRef Tok = next();
     if (SymbolAssignment *Assignment = readProvideOrAssignment(Tok, false))
       Cmd->Commands.emplace_back(Assignment);
@@ -1367,7 +1377,7 @@ ScriptParser::readOutputSectionDescription(StringRef OutSec) {
   }
   Cmd->Phdrs = readOutputSectionPhdrs();
 
-  if (skip("="))
+  if (consume("="))
     Cmd->Filler = readOutputSectionFiller(next());
   else if (peek().startswith("="))
     Cmd->Filler = readOutputSectionFiller(next().drop_front());
@@ -1430,8 +1440,10 @@ SymbolAssignment *ScriptParser::readAssignment(StringRef Name) {
   bool IsAbsolute = false;
   Expr E;
   assert(Op == "=" || Op == "+=");
-  if (skip("ABSOLUTE")) {
-    E = readParenExpr();
+  if (consume("ABSOLUTE")) {
+    // The RHS may be something like "ABSOLUTE(.) & 0xff".
+    // Call readExpr1 to read the whole expression.
+    E = readExpr1(readParenExpr(), 0);
     IsAbsolute = true;
   } else {
     E = readExpr();
@@ -1495,7 +1507,7 @@ Expr ScriptParser::readExpr1(Expr Lhs, int MinPrec) {
       return readTernary(Lhs);
     if (precedence(Op1) < MinPrec)
       break;
-    next();
+    skip();
     Expr Rhs = readPrimary();
 
     // Evaluate the remaining part of the expression first if the
@@ -1623,7 +1635,7 @@ Expr ScriptParser::readPrimary() {
   }
   if (Tok == "SEGMENT_START") {
     expect("(");
-    next();
+    skip();
     expect(",");
     Expr E = readExpr();
     expect(")");
@@ -1678,7 +1690,7 @@ Expr ScriptParser::readPrimary() {
 }
 
 Expr ScriptParser::readTernary(Expr Cond) {
-  next();
+  skip();
   Expr L = readExpr();
   expect(":");
   Expr R = readExpr();
@@ -1706,8 +1718,14 @@ std::vector<StringRef> ScriptParser::readOutputSectionPhdrs() {
   return Phdrs;
 }
 
+// Read a program header type name. The next token must be a
+// name of a program header type or a constant (e.g. "0x3").
 unsigned ScriptParser::readPhdrType() {
   StringRef Tok = next();
+  uint64_t Val;
+  if (readInteger(Tok, Val))
+    return Val;
+
   unsigned Ret = StringSwitch<unsigned>(Tok)
                      .Case("PT_NULL", PT_NULL)
                      .Case("PT_LOAD", PT_LOAD)
@@ -1737,9 +1755,9 @@ void ScriptParser::readVersionDeclaration(StringRef VerStr) {
   size_t VersionId = Config->VersionDefinitions.size() + 2;
   Config->VersionDefinitions.push_back({VerStr, VersionId});
 
-  if (skip("global:") || peek() != "local:")
+  if (consume("global:") || peek() != "local:")
     readGlobal(VerStr);
-  if (skip("local:"))
+  if (consume("local:"))
     readLocal();
   expect("}");
 
@@ -1748,7 +1766,7 @@ void ScriptParser::readVersionDeclaration(StringRef VerStr) {
   // version hierarchy is, probably against your instinct, purely for human; the
   // runtime doesn't care about them at all. In LLD, we simply skip the token.
   if (!VerStr.empty() && peek() != ";")
-    next();
+    skip();
   expect(";");
 }
 
@@ -1782,13 +1800,13 @@ void ScriptParser::readGlobal(StringRef VerStr) {
     Globals = &Config->VersionDefinitions.back().Globals;
 
   for (;;) {
-    if (skip("extern"))
+    if (consume("extern"))
       readExtern(Globals);
 
     StringRef Cur = peek();
     if (Cur == "}" || Cur == "local:" || Error)
       return;
-    next();
+    skip();
     Globals->push_back({unquote(Cur), false, hasWildcard(Cur)});
     expect(";");
   }

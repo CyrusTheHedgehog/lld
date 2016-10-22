@@ -29,10 +29,6 @@ using namespace llvm::support::endian;
 using namespace lld;
 using namespace lld::elf;
 
-ArrayRef<uint8_t> InputSectionData::getData(const SectionPiece &P) const {
-  return Data.slice(P.InputOff, P.size());
-}
-
 template <class ELFT>
 static ArrayRef<uint8_t> getSectionContents(elf::ObjectFile<ELFT> *File,
                                             const typename ELFT::Shdr *Hdr) {
@@ -53,7 +49,8 @@ InputSectionBase<ELFT>::InputSectionBase(elf::ObjectFile<ELFT> *File,
                                          const Elf_Shdr *Hdr, StringRef Name,
                                          Kind SectionKind)
     : InputSectionData(SectionKind, Name, getSectionContents(File, Hdr),
-                       isCompressed<ELFT>(Hdr, Name), !Config->GcSections),
+                       isCompressed<ELFT>(Hdr, Name),
+                       !Config->GcSections || !(Hdr->sh_flags & SHF_ALLOC)),
       Header(Hdr), File(File), Repl(this) {
   // The ELF spec states that a value of 0 means the section has
   // no alignment constraits.
@@ -172,9 +169,8 @@ InputSectionBase<ELFT>::getOffset(const DefinedRegular<ELFT> &Sym) const {
   return getOffset(Sym.Value);
 }
 
-template<class ELFT>
-InputSectionBase<ELFT>*
-InputSectionBase<ELFT>::getLinkOrderDep() const {
+template <class ELFT>
+InputSectionBase<ELFT> *InputSectionBase<ELFT>::getLinkOrderDep() const {
   const Elf_Shdr *Hdr = getSectionHdr();
   if ((Hdr->sh_flags & SHF_LINK_ORDER) && Hdr->sh_link != 0)
     return getFile()->getSections()[Hdr->sh_link];
@@ -198,8 +194,7 @@ InputSectionBase<ELFT> *InputSection<ELFT>::getRelocatedSection() {
   return Sections[this->Header->sh_info];
 }
 
-template <class ELFT>
-void InputSection<ELFT>::addThunk(const Thunk<ELFT> *T) {
+template <class ELFT> void InputSection<ELFT>::addThunk(const Thunk<ELFT> *T) {
   Thunks.push_back(T);
 }
 
@@ -249,6 +244,7 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
                                     const SymbolBody &Body, RelExpr Expr) {
   switch (Expr) {
   case R_HINT:
+  case R_TLSDESC_CALL:
     llvm_unreachable("cannot relocate hint relocs");
   case R_TLSLD:
     return Out<ELFT>::Got->getTlsIndexOff() + A - Out<ELFT>::Got->getSize();
@@ -329,6 +325,7 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
     // of sum the symbol's value and the addend.
     return Out<ELFT>::Got->getMipsLocalPageOffset(Body.getVA<ELFT>(A));
   case R_MIPS_GOT_OFF:
+  case R_MIPS_GOT_OFF32:
     // In case of MIPS if a GOT relocation has non-zero addend this addend
     // should be applied to the GOT entry content not to the GOT entry offset.
     // That is why we use separate expression type.
@@ -451,7 +448,7 @@ void InputSectionBase<ELFT>::relocate(uint8_t *Buf, uint8_t *BufEnd) {
       // Patch a nop (0x60000000) to a ld.
       if (BufLoc + 8 <= BufEnd && read32be(BufLoc + 4) == 0x60000000)
         write32be(BufLoc + 4, 0xe8410028); // ld %r2, 40(%r1)
-      // fallthrough
+    // fallthrough
     default:
       Target->relocateOne(BufLoc, Type, SymVA);
       break;
@@ -539,8 +536,7 @@ static unsigned getReloc(IntTy Begin, IntTy Size, const ArrayRef<RelTy> &Rels,
 
 // .eh_frame is a sequence of CIE or FDE records.
 // This function splits an input section into records and returns them.
-template <class ELFT>
-void EhInputSection<ELFT>::split() {
+template <class ELFT> void EhInputSection<ELFT>::split() {
   // Early exit if already split.
   if (!this->Pieces.empty())
     return;
@@ -599,11 +595,20 @@ MergeInputSection<ELFT>::splitStrings(ArrayRef<uint8_t> Data, size_t EntSize) {
     if (End == StringRef::npos)
       fatal(getName(this) + ": string is not null terminated");
     size_t Size = End + EntSize;
-    V.emplace_back(Off, Data.slice(0, Size), !IsAlloca);
+    V.emplace_back(Off, !IsAlloca);
+    Hashes.push_back(hash_value(toStringRef(Data.slice(0, Size))));
     Data = Data.slice(Size);
     Off += Size;
   }
   return V;
+}
+
+template <class ELFT>
+ArrayRef<uint8_t> MergeInputSection<ELFT>::getData(
+    std::vector<SectionPiece>::const_iterator I) const {
+  auto Next = I + 1;
+  size_t End = Next == Pieces.end() ? this->Data.size() : Next->InputOff;
+  return this->Data.slice(I->InputOff, End - I->InputOff);
 }
 
 // Split non-SHF_STRINGS section. Such section is a sequence of
@@ -615,8 +620,11 @@ MergeInputSection<ELFT>::splitNonStrings(ArrayRef<uint8_t> Data,
   std::vector<SectionPiece> V;
   size_t Size = Data.size();
   assert((Size % EntSize) == 0);
-  for (unsigned I = 0, N = Size; I != N; I += EntSize)
-    V.emplace_back(I, Data.slice(I, EntSize));
+  bool IsAlloca = this->getSectionHdr()->sh_flags & SHF_ALLOC;
+  for (unsigned I = 0, N = Size; I != N; I += EntSize) {
+    Hashes.push_back(hash_value(toStringRef(Data.slice(I, EntSize))));
+    V.emplace_back(I, !IsAlloca);
+  }
   return V;
 }
 
@@ -651,6 +659,19 @@ SectionPiece *MergeInputSection<ELFT>::getSectionPiece(uintX_t Offset) {
   return const_cast<SectionPiece *>(This->getSectionPiece(Offset));
 }
 
+template <class It, class T, class Compare>
+static It fastUpperBound(It First, It Last, const T &Value, Compare Comp) {
+  size_t Size = std::distance(First, Last);
+  assert(Size != 0);
+  while (Size != 1) {
+    size_t H = Size / 2;
+    const It MI = First + H;
+    Size -= H;
+    First = Comp(Value, *MI) ? First : First + H;
+  }
+  return Comp(Value, *First) ? First : First + 1;
+}
+
 template <class ELFT>
 const SectionPiece *
 MergeInputSection<ELFT>::getSectionPiece(uintX_t Offset) const {
@@ -659,7 +680,7 @@ MergeInputSection<ELFT>::getSectionPiece(uintX_t Offset) const {
     fatal(getName(this) + ": entry is past the end of the section");
 
   // Find the element this offset points to.
-  auto I = std::upper_bound(
+  auto I = fastUpperBound(
       Pieces.begin(), Pieces.end(), Offset,
       [](const uintX_t &A, const SectionPiece &B) { return A < B.InputOff; });
   --I;
@@ -690,17 +711,21 @@ typename ELFT::uint MergeInputSection<ELFT>::getOffset(uintX_t Offset) const {
 
 // Create a map from input offsets to output offsets for all section pieces.
 // It is called after finalize().
-template <class ELFT> void  MergeInputSection<ELFT>::finalizePieces() {
-  OffsetMap.grow(this->Pieces.size());
-  for (SectionPiece &Piece : this->Pieces) {
+template <class ELFT> void MergeInputSection<ELFT>::finalizePieces() {
+  OffsetMap.reserve(this->Pieces.size());
+  auto HashI = Hashes.begin();
+  for (auto I = Pieces.begin(), E = Pieces.end(); I != E; ++I) {
+    uint32_t Hash = *HashI;
+    ++HashI;
+    SectionPiece &Piece = *I;
     if (!Piece.Live)
       continue;
-    if (Piece.OutputOff == size_t(-1)) {
+    if (Piece.OutputOff == -1) {
       // Offsets of tail-merged strings are computed lazily.
       auto *OutSec = static_cast<MergeOutputSection<ELFT> *>(this->OutSec);
-      ArrayRef<uint8_t> D = this->getData(Piece);
+      ArrayRef<uint8_t> D = this->getData(I);
       StringRef S((const char *)D.data(), D.size());
-      CachedHashString V(S, Piece.Hash);
+      CachedHashStringRef V(S, Hash);
       Piece.OutputOff = OutSec->getOffset(V);
     }
     OffsetMap[Piece.InputOff] = Piece.OutputOff;

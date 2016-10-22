@@ -17,6 +17,7 @@
 
 #include "lld/Core/LLVM.h"
 #include "lld/Core/Reproduce.h"
+#include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/Comdat.h"
@@ -151,7 +152,7 @@ public:
   ArrayRef<SymbolBody *> getNonLocalSymbols();
 
   explicit ObjectFile(MemoryBufferRef M);
-  void parse(llvm::DenseSet<StringRef> &ComdatGroups);
+  void parse(llvm::DenseSet<llvm::CachedHashStringRef> &ComdatGroups);
 
   ArrayRef<InputSectionBase<ELFT> *> getSections() const { return Sections; }
   InputSectionBase<ELFT> *getSection(const Elf_Sym &Sym) const;
@@ -162,7 +163,8 @@ public:
     return *SymbolBodies[SymbolIndex];
   }
 
-  template <typename RelT> SymbolBody &getRelocTargetSym(const RelT &Rel) const {
+  template <typename RelT>
+  SymbolBody &getRelocTargetSym(const RelT &Rel) const {
     uint32_t SymIndex = Rel.getSymbol(Config->Mips64EL);
     return getSymbolBody(SymIndex);
   }
@@ -183,7 +185,8 @@ public:
   llvm::BumpPtrAllocator Alloc;
 
 private:
-  void initializeSections(llvm::DenseSet<StringRef> &ComdatGroups);
+  void
+  initializeSections(llvm::DenseSet<llvm::CachedHashStringRef> &ComdatGroups);
   void initializeSymbols();
   void initializeReverseDependencies();
   InputSectionBase<ELFT> *getRelocTarget(const Elf_Shdr &Sec);
@@ -261,7 +264,7 @@ public:
   explicit BitcodeFile(MemoryBufferRef M);
   static bool classof(const InputFile *F) { return F->kind() == BitcodeKind; }
   template <class ELFT>
-  void parse(llvm::DenseSet<StringRef> &ComdatGroups);
+  void parse(llvm::DenseSet<llvm::CachedHashStringRef> &ComdatGroups);
   ArrayRef<Symbol *> getSymbols() { return Symbols; }
   std::unique_ptr<llvm::lto::InputFile> Obj;
 
@@ -322,13 +325,11 @@ public:
 class BinaryFile : public InputFile {
 public:
   explicit BinaryFile(MemoryBufferRef M) : InputFile(BinaryKind, M) {}
-
   static bool classof(const InputFile *F) { return F->kind() == BinaryKind; }
-
   template <class ELFT> InputFile *createELF();
 
 private:
-  std::vector<uint8_t> ELFData;
+  std::vector<uint8_t> Buffer;
 };
 
 InputFile *createObjectFile(MemoryBufferRef MB, StringRef ArchiveName = "",

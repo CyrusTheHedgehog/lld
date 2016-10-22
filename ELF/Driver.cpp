@@ -19,6 +19,7 @@
 #include "SymbolTable.h"
 #include "Target.h"
 #include "Writer.h"
+#include "lld/Config/Version.h"
 #include "lld/Driver/Driver.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -41,6 +42,7 @@ LinkerDriver *elf::Driver;
 bool elf::link(ArrayRef<const char *> Args, raw_ostream &Error) {
   HasError = false;
   ErrorOS = &Error;
+  Argv0 = Args[0];
 
   Configuration C;
   LinkerDriver D;
@@ -115,17 +117,15 @@ LinkerDriver::getArchiveMembers(MemoryBufferRef MB) {
 
 // Opens and parses a file. Path has to be resolved already.
 // Newly created memory buffers are owned by this driver.
-void LinkerDriver::addFile(StringRef Path, bool KnownScript) {
+void LinkerDriver::addFile(StringRef Path) {
   using namespace sys::fs;
-  if (Config->Verbose)
-    outs() << Path << "\n";
 
   Optional<MemoryBufferRef> Buffer = readFile(Path);
   if (!Buffer.hasValue())
     return;
   MemoryBufferRef MBRef = *Buffer;
 
-  if (Config->Binary && !KnownScript) {
+  if (InBinary) {
     Files.push_back(new BinaryFile(MBRef));
     return;
   }
@@ -158,6 +158,9 @@ void LinkerDriver::addFile(StringRef Path, bool KnownScript) {
 }
 
 Optional<MemoryBufferRef> LinkerDriver::readFile(StringRef Path) {
+  if (Config->Verbose)
+    outs() << Path << "\n";
+
   auto MBOrErr = MemoryBuffer::getFile(Path);
   if (auto EC = MBOrErr.getError()) {
     error(EC, "cannot open " + Path);
@@ -232,8 +235,8 @@ static void checkOptions(opt::InputArgList &Args) {
   }
 }
 
-static StringRef
-getString(opt::InputArgList &Args, unsigned Key, StringRef Default = "") {
+static StringRef getString(opt::InputArgList &Args, unsigned Key,
+                           StringRef Default = "") {
   if (auto *Arg = Args.getLastArg(Key))
     return Arg->getValue();
   return Default;
@@ -262,8 +265,8 @@ static bool hasZOption(opt::InputArgList &Args, StringRef Key) {
   return false;
 }
 
-static uint64_t
-getZOptionValue(opt::InputArgList &Args, StringRef Key, uint64_t Default) {
+static uint64_t getZOptionValue(opt::InputArgList &Args, StringRef Key,
+                                uint64_t Default) {
   for (auto *Arg : Args.filtered(OPT_z)) {
     StringRef Value = Arg->getValue();
     size_t Pos = Value.find("=");
@@ -286,7 +289,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
     return;
   }
   if (Args.hasArg(OPT_version))
-    outs() << getVersionString();
+    outs() << getLLDVersion() << "\n";
 
   if (const char *Path = getReproduceOption(Args)) {
     // Note that --reproduce is a debug option so you can ignore it
@@ -295,7 +298,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
     if (F) {
       Cpio.reset(*F);
       Cpio->append("response.txt", createResponseFile(Args));
-      Cpio->append("version.txt", getVersionString());
+      Cpio->append("version.txt", (getLLDVersion() + "\n").str());
     } else
       error(F.getError(),
             Twine("--reproduce: failed to open ") + Path + ".cpio");
@@ -304,6 +307,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   readConfigs(Args);
   initLLVM(Args);
   createFiles(Args);
+  inferMachineType();
   checkOptions(Args);
   if (HasError)
     return;
@@ -322,7 +326,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
     link<ELF64BE>(Args);
     return;
   default:
-    error("target emulation unknown: -m or at least one .o file required");
+    llvm_unreachable("unknown Config->EKind");
   }
 }
 
@@ -343,6 +347,20 @@ static UnresolvedPolicy getUnresolvedSymbolOption(opt::InputArgList &Args) {
     error("unknown --unresolved-symbols value: " + S);
   }
   return UnresolvedPolicy::ReportError;
+}
+
+static Target2Policy getTarget2Option(opt::InputArgList &Args) {
+  if (auto *Arg = Args.getLastArg(OPT_target2)) {
+    StringRef S = Arg->getValue();
+    if (S == "rel")
+      return Target2Policy::Rel;
+    if (S == "abs")
+      return Target2Policy::Abs;
+    if (S == "got-rel")
+      return Target2Policy::GotRel;
+    error("unknown --target2 option: " + S);
+  }
+  return Target2Policy::GotRel;
 }
 
 static bool isOutputFormatBinary(opt::InputArgList &Args) {
@@ -432,8 +450,6 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   if (!RPaths.empty())
     Config->RPath = llvm::join(RPaths.begin(), RPaths.end(), ":");
 
-  Config->SectionStartMap = getSectionStartMap(Args);
-
   if (auto *Arg = Args.getLastArg(OPT_m)) {
     // Parse ELF{32,64}{LE,BE} and CPU type.
     StringRef S = Arg->getValue();
@@ -452,11 +468,12 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   Config->ExportDynamic = Args.hasArg(OPT_export_dynamic);
   Config->FatalWarnings = Args.hasArg(OPT_fatal_warnings);
   Config->GcSections = getArg(Args, OPT_gc_sections, OPT_no_gc_sections, false);
+  Config->GdbIndex = Args.hasArg(OPT_gdb_index);
   Config->ICF = Args.hasArg(OPT_icf);
   Config->NoGnuUnique = Args.hasArg(OPT_no_gnu_unique);
   Config->NoUndefinedVersion = Args.hasArg(OPT_no_undefined_version);
   Config->Nostdlib = Args.hasArg(OPT_nostdlib);
-  Config->Pie = Args.hasArg(OPT_pie);
+  Config->Pie = getArg(Args, OPT_pie, OPT_nopie, false);
   Config->PrintGcSections = Args.hasArg(OPT_print_gc_sections);
   Config->Relocatable = Args.hasArg(OPT_relocatable);
   Config->SaveTemps = Args.hasArg(OPT_save_temps);
@@ -494,12 +511,17 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   Config->ZNow = hasZOption(Args, "now");
   Config->ZOrigin = hasZOption(Args, "origin");
   Config->ZRelro = !hasZOption(Args, "norelro");
+  Config->ZStackSize = getZOptionValue(Args, "stack-size", -1);
   Config->ZWxneeded = hasZOption(Args, "wxneeded");
+
+  Config->OFormatBinary = isOutputFormatBinary(Args);
+  Config->SectionStartMap = getSectionStartMap(Args);
+  Config->SortSection = getSortKind(Args);
+  Config->Target2 = getTarget2Option(Args);
+  Config->UnresolvedSymbols = getUnresolvedSymbolOption(Args);
 
   if (!Config->Relocatable)
     Config->Strip = getStripOption(Args);
-
-  Config->ZStackSize = getZOptionValue(Args, "stack-size", -1);
 
   // Config->Pic is true if we are generating position-independent code.
   Config->Pic = Config->Pie || Config->Shared;
@@ -536,8 +558,6 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
     }
   }
 
-  Config->OFormatBinary = isOutputFormatBinary(Args);
-
   for (auto *Arg : Args.filtered(OPT_auxiliary))
     Config->AuxiliaryList.push_back(Arg->getValue());
   if (!Config->Shared && !Config->AuxiliaryList.empty())
@@ -545,10 +565,6 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
 
   for (auto *Arg : Args.filtered(OPT_undefined))
     Config->Undefined.push_back(Arg->getValue());
-
-  Config->SortSection = getSortKind(Args);
-
-  Config->UnresolvedSymbols = getUnresolvedSymbolOption(Args);
 
   if (auto *Arg = Args.getLastArg(OPT_dynamic_list))
     if (Optional<MemoryBufferRef> Buffer = readFile(Arg->getValue()))
@@ -562,6 +578,17 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
       readVersionScript(*Buffer);
 }
 
+// Returns a value of "-format" option.
+static bool getBinaryOption(StringRef S) {
+  if (S == "binary")
+    return true;
+  if (S == "elf" || S == "default")
+    return false;
+  error("unknown -format value: " + S +
+        " (supported formats: elf, default, binary)");
+  return false;
+}
+
 void LinkerDriver::createFiles(opt::InputArgList &Args) {
   for (auto *Arg : Args) {
     switch (Arg->getOption().getID()) {
@@ -573,22 +600,15 @@ void LinkerDriver::createFiles(opt::InputArgList &Args) {
       break;
     case OPT_alias_script_T:
     case OPT_script:
-      addFile(Arg->getValue(), true);
+      if (Optional<MemoryBufferRef> MB = readFile(Arg->getValue()))
+        readLinkerScript(*MB);
       break;
     case OPT_as_needed:
       Config->AsNeeded = true;
       break;
-    case OPT_format: {
-      StringRef Val = Arg->getValue();
-      if (Val == "elf" || Val == "default")
-        Config->Binary = false;
-      else if (Val == "binary")
-        Config->Binary = true;
-      else
-        error("unknown " + Arg->getSpelling() + " format: " + Arg->getValue() +
-              " (supported formats: elf, default, binary)");
+    case OPT_format:
+      InBinary = getBinaryOption(Arg->getValue());
       break;
-    }
     case OPT_no_as_needed:
       Config->AsNeeded = false;
       break;
@@ -614,18 +634,22 @@ void LinkerDriver::createFiles(opt::InputArgList &Args) {
   }
 
   if (Files.empty() && !HasError)
-    error("no input files.");
+    error("no input files");
+}
 
-  // If -m <machine_type> was not given, infer it from object files.
-  if (Config->EKind == ELFNoneKind) {
-    for (InputFile *F : Files) {
-      if (F->EKind == ELFNoneKind)
-        continue;
-      Config->EKind = F->EKind;
-      Config->EMachine = F->EMachine;
-      break;
-    }
+// If -m <machine_type> was not given, infer it from object files.
+void LinkerDriver::inferMachineType() {
+  if (Config->EKind != ELFNoneKind)
+    return;
+
+  for (InputFile *F : Files) {
+    if (F->EKind == ELFNoneKind)
+      continue;
+    Config->EKind = F->EKind;
+    Config->EMachine = F->EMachine;
+    return;
   }
+  error("target emulation unknown: -m or at least one .o file required");
 }
 
 // Do actual linking. Note that when this function is called,
@@ -677,22 +701,21 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
   // Add the start symbol.
   // It initializes either Config->Entry or Config->EntryAddr.
   // Note that AMDGPU binaries have no entries.
-  bool HasEntryAddr = false;
   if (!Config->Entry.empty()) {
     // It is either "-e <addr>" or "-e <symbol>".
-    HasEntryAddr = !Config->Entry.getAsInteger(0, Config->EntryAddr);
+    if (!Config->Entry.getAsInteger(0, Config->EntryAddr))
+      Config->Entry = "";
   } else if (!Config->Shared && !Config->Relocatable &&
              Config->EMachine != EM_AMDGPU) {
     // -e was not specified. Use the default start symbol name
     // if it is resolvable.
     Config->Entry = (Config->EMachine == EM_MIPS) ? "__start" : "_start";
   }
-  if (!HasEntryAddr && !Config->Entry.empty()) {
-    if (Symtab.find(Config->Entry))
-      Config->EntrySym = Symtab.addUndefined(Config->Entry);
-    else
-      warn("entry symbol " + Config->Entry + " not found, assuming 0");
-  }
+
+  // If an object file defining the entry symbol is in an archive file,
+  // extract the file now.
+  if (Symtab.find(Config->Entry))
+    Symtab.addUndefined(Config->Entry);
 
   if (HasError)
     return; // There were duplicate symbols or incompatible files
