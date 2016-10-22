@@ -24,8 +24,17 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/TargetRegistry.h"
+#include "llvm/MC/MCDisassembler/MCDisassembler.h"
+#include "llvm/MC/MCInst.h"
+#include "llvm/MC/MCInstrDesc.h"
+#include "llvm/MC/MCInstrInfo.h"
+#include "llvm/MC/MCContext.h"
+#include "llvm/MC/MCAsmInfo.h"
+#include "llvm/MC/MCCodeEmitter.h"
 #include <cstdlib>
 #include <utility>
+#include <unordered_map>
 
 using namespace llvm;
 using namespace llvm::ELF;
@@ -38,6 +47,13 @@ using namespace lld::elf;
 namespace lld {
 namespace hanafuda {
 
+class LinkerDriver;
+
+// Maintains structural information about loaded base file
+// and template for outputting a new file.
+//
+// Capable of resolving original data pointers based on
+// VAs (runtime addresses) loaded from the symbol list.
 class DOLFile {
   MemoryBufferRef MB;
 public:
@@ -85,8 +101,11 @@ private:
   uint32_t BssSize;
   uint32_t EntryPoint;
 
+  std::unordered_multimap<uint32_t, uint32_t> OrigCallAddrToInstFileOffs;
+  void scanForRelocations(LinkerDriver &Drv);
+
 public:
-  DOLFile(MemoryBufferRef M) : MB(M) {
+  DOLFile(MemoryBufferRef M, LinkerDriver &Drv) : MB(M) {
     Header head = *reinterpret_cast<const Header*>(M.getBufferStart());
     head.swapBig();
 
@@ -111,6 +130,8 @@ public:
     BssAddr = head.BssAddr;
     BssSize = head.BssSize;
     EntryPoint = head.EntryPoint;
+
+    scanForRelocations(Drv);
   }
 
   int getUnusedTextSectionIndex() const {
@@ -163,6 +184,25 @@ public:
     }
     return true;
   }
+
+  const char* resolveVAData(uint32_t addr) const {
+    for (int i = 0; i < 7; ++i) {
+      const Section& sec = getTextSection(i);
+      if (addr >= sec.Addr && addr < (sec.Addr + sec.Length)) {
+        return MB.getBuffer().data() + sec.Offset + (addr - sec.Addr);
+      }
+    }
+    for (int i = 0; i < 11; ++i) {
+      const Section& sec = getDataSection(i);
+      if (addr >= sec.Addr && addr < (sec.Addr + sec.Length)) {
+        return MB.getBuffer().data() + sec.Offset + (addr - sec.Addr);
+      }
+    }
+    return nullptr;
+  }
+
+  void replaceTargetAddressRelocations(LinkerDriver &Drv,
+                                       uint32_t oldAddr, uint32_t newAddr);
 };
 
 class SymbolListFile {
@@ -194,11 +234,75 @@ public:
 };
 
 class LinkerDriver : public elf::LinkerDriver {
+  friend class HanafudaSymbolTable;
+  friend class DOLFile;
   Optional<DOLFile> DolFile;
+
+  std::unique_ptr<MCSubtargetInfo> STI;
+  std::unique_ptr<MCRegisterInfo> MRI;
+  std::unique_ptr<MCAsmInfo> MAI;
+  std::unique_ptr<MCInstrInfo> MCII;
+  std::unique_ptr<MCContext> Ctx;
+  std::unique_ptr<MCDisassembler> DC;
+  std::unique_ptr<MCCodeEmitter> MCE;
+
   void link(llvm::opt::InputArgList &Args);
 public:
   void main(ArrayRef<const char *> Args);
 };
+
+void DOLFile::scanForRelocations(LinkerDriver &Drv) {
+  unsigned ppcLR = Drv.MRI->getRARegister();
+
+  uint64_t Size;
+  ArrayRef<uint8_t> Data(reinterpret_cast<const unsigned char*>(
+                         MB.getBuffer().data()), MB.getBufferSize());
+  for (int s = 0; s < 7; ++s) {
+    Section& sec = Texts[s];
+    if (!sec.Offset)
+      continue;
+
+    for (uint64_t Index = 0; Index < sec.Length; Index += Size) {
+      uint64_t FileIndex = sec.Offset + Index;
+      uint64_t VAIndex = sec.Addr + Index;
+
+      MCDisassembler::DecodeStatus S;
+      MCInst Inst;
+      S = Drv.DC->getInstruction(Inst, Size, Data.slice(FileIndex), VAIndex,
+                                 /*REMOVE*/ nulls(), nulls());
+      switch (S) {
+      case MCDisassembler::Fail:
+        if (Size == 0)
+          Size = 1; // skip illegible bytes
+        break;
+
+      case MCDisassembler::SoftFail:
+        LLVM_FALLTHROUGH;
+
+      case MCDisassembler::Success: {
+        const MCInstrDesc &Desc = Drv.MCII->get(Inst.getOpcode());
+        if (Desc.isCall() && Desc.hasImplicitDefOfPhysReg(ppcLR)) {
+          for (const MCOperand &op : Inst) {
+            if (op.isImm()) {
+              OrigCallAddrToInstFileOffs.insert(std::make_pair(op.getImm(), FileIndex));
+              break;
+            }
+          }
+        }
+        break;
+      }
+      }
+    }
+  }
+}
+
+void DOLFile::replaceTargetAddressRelocations(LinkerDriver &Drv,
+                                              uint32_t oldAddr, uint32_t newAddr) {
+  auto range = OrigCallAddrToInstFileOffs.equal_range(oldAddr);
+  for (auto it = range.first; it != range.second; ++it) {
+    it->second;
+  }
+}
 
 bool link(ArrayRef<const char *> Args, raw_ostream &Error) {
   HasError = false;
@@ -308,7 +412,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   // Read .dol to driver-owned buffer
   Optional<MemoryBufferRef> dolBuffer = readFile(dolArg);
   if (!dolBuffer.hasValue()) return;
-  DolFile.emplace(dolBuffer.getValue());
+  DolFile.emplace(dolBuffer.getValue(), *this);
 
   if (const char *Path = getReproduceOption(Args)) {
     // Note that --reproduce is a debug option so you can ignore it
@@ -330,31 +434,44 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   if (HasError)
     return;
 
+  // Setup disassembler and code emitter context for performing instruction patching
+  std::string err;
+  std::string TT = "powerpc-unknown-hanafuda-eabi";
+  std::string CPU = "750cl";
+  const llvm::Target *TheTarget = TargetRegistry::lookupTarget(TT, err);
+  STI.reset(TheTarget->createMCSubtargetInfo(TT, CPU, ""));
+  MRI.reset(TheTarget->createMCRegInfo(TT));
+  MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT));
+  MCII.reset(TheTarget->createMCInstrInfo());
+  Ctx = make_unique<MCContext>(MAI.get(), MRI.get(), nullptr);
+  DC.reset(TheTarget->createMCDisassembler(*STI, *Ctx));
+  MCE.reset(TheTarget->createMCCodeEmitter(*MCII, *MRI, *Ctx));
+
   // Do actual link, merging base symbols with linked symbols
   link(Args);
 }
 
 // Override symbol replace trigger to ensure .dol-sourced symbols are patched
 class HanafudaSymbolTable : public SymbolTable<ELF32BE> {
+  LinkerDriver &D;
   bool replaceDefinedSymbolPreTrigger(Symbol *S, StringRef Name) override {
     SymbolBody *body = S->body();
     if (body->isUndefined())
       return false;
     if (const auto *DR = dyn_cast<DefinedRegular<ELF32BE>>(body)) {
-      if (DR->HanafudaType == HanafudaSecType::Text) {
-
-      } else if (DR->HanafudaType == HanafudaSecType::Data) {
-
-      }
+      D.DolFile->replaceTargetAddressRelocations(D, DR->Value, 0);
     }
     return false;
   }
+public:
+  HanafudaSymbolTable(LinkerDriver &Din) : D(Din) {}
 };
 
 // Do actual linking. Note that when this function is called,
 // all linker scripts have already been parsed.
 void LinkerDriver::link(opt::InputArgList &Args) {
-  HanafudaSymbolTable Symtab;
+  // Create symbol table and propogate to user code
+  HanafudaSymbolTable Symtab(*this);
   elf::Symtab<ELF32BE>::X = &Symtab;
 
   // Load symbol list if provided and populate Symtab
@@ -377,7 +494,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   }
 
   std::unique_ptr<TargetInfo> TI(createTarget());
-  Target = TI.get();
+  TargetInfo *Target = TI.get();
   LinkerScript<ELF32BE> LS;
   ScriptBase = Script<ELF32BE>::X = &LS;
 
