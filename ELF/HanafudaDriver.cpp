@@ -19,6 +19,7 @@
 #include "SymbolTable.h"
 #include "Target.h"
 #include "Writer.h"
+#include "lld/Config/Version.h"
 #include "lld/Driver/Driver.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -400,7 +401,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
     return;
   }
   if (Args.hasArg(OPT_version))
-    outs() << getVersionString();
+    outs() << getLLDVersion() << "\n";
 
   // Ensure base .dol is provided
   if (!Args.hasArg(OPT_hanafuda_base_dol)) {
@@ -421,7 +422,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
     if (F) {
       Cpio.reset(*F);
       Cpio->append("response.txt", createResponseFile(Args));
-      Cpio->append("version.txt", getVersionString());
+      Cpio->append("version.txt", (getLLDVersion() + "\n").str());
     } else
       error(F.getError(),
             Twine("--reproduce: failed to open ") + Path + ".cpio");
@@ -535,22 +536,21 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   // Add the start symbol.
   // It initializes either Config->Entry or Config->EntryAddr.
   // Note that AMDGPU binaries have no entries.
-  bool HasEntryAddr = false;
   if (!Config->Entry.empty()) {
     // It is either "-e <addr>" or "-e <symbol>".
-    HasEntryAddr = !Config->Entry.getAsInteger(0, Config->EntryAddr);
+    if (!Config->Entry.getAsInteger(0, Config->EntryAddr))
+      Config->Entry = "";
   } else if (!Config->Shared && !Config->Relocatable &&
              Config->EMachine != EM_AMDGPU) {
     // -e was not specified. Use the default start symbol name
     // if it is resolvable.
     Config->Entry = (Config->EMachine == EM_MIPS) ? "__start" : "_start";
   }
-  if (!HasEntryAddr && !Config->Entry.empty()) {
-    if (Symtab.find(Config->Entry))
-      Config->EntrySym = Symtab.addUndefined(Config->Entry);
-    else
-      warn("entry symbol " + Config->Entry + " not found, assuming 0");
-  }
+
+  // If an object file defining the entry symbol is in an archive file,
+  // extract the file now.
+  if (Symtab.find(Config->Entry))
+    Symtab.addUndefined(Config->Entry);
 
   if (HasError)
     return; // There were duplicate symbols or incompatible files
