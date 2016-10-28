@@ -60,8 +60,8 @@ private:
 
   std::vector<Phdr> createPhdrs();
   void assignAddresses();
-  void assignFileOffsets();
-  void assignFileOffsetsBinary();
+  void assignFileOffsets(uintX_t Off=0);
+  void assignFileOffsetsBinary(uintX_t Off=0);
   void setPhdrs();
   void fixHeaders();
   void fixSectionAlignments();
@@ -280,7 +280,7 @@ template <class ELFT> void Writer<ELFT>::run() {
     return;
 
   if (Config->Relocatable) {
-    assignFileOffsets();
+    assignFileOffsets(Config->InitialFileOffset);
   } else {
     Phdrs = Script<ELFT>::X->hasPhdrsCommands() ? Script<ELFT>::X->createPhdrs()
                                                 : createPhdrs();
@@ -293,9 +293,9 @@ template <class ELFT> void Writer<ELFT>::run() {
     }
 
     if (!Config->OFormatBinary)
-      assignFileOffsets();
+      assignFileOffsets(Config->InitialFileOffset);
     else
-      assignFileOffsetsBinary();
+      assignFileOffsetsBinary(Config->InitialFileOffset);
 
     setPhdrs();
     fixAbsoluteSymbols();
@@ -304,6 +304,8 @@ template <class ELFT> void Writer<ELFT>::run() {
   openFile();
   if (HasError)
     return;
+  if (Config->OPreWrite)
+    Config->OPreWrite(Buffer->getBufferStart(), &OutputSections);
   if (!Config->OFormatBinary) {
     writeHeader();
     writeSections();
@@ -1228,8 +1230,7 @@ void setOffset(OutputSectionBase<ELFT> *Sec, uintX_t &Off) {
   Off += Sec->getSize();
 }
 
-template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary() {
-  uintX_t Off = 0;
+template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary(uintX_t Off) {
   for (OutputSectionBase<ELFT> *Sec : OutputSections)
     if (Sec->getFlags() & SHF_ALLOC)
       setOffset(Sec, Off);
@@ -1237,8 +1238,7 @@ template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary() {
 }
 
 // Assign file offsets to output sections.
-template <class ELFT> void Writer<ELFT>::assignFileOffsets() {
-  uintX_t Off = 0;
+template <class ELFT> void Writer<ELFT>::assignFileOffsets(uintX_t Off) {
   setOffset(Out<ELFT>::ElfHeader, Off);
   setOffset(Out<ELFT>::ProgramHeaders, Off);
 

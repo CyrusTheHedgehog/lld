@@ -146,6 +146,8 @@ struct Configuration {
   unsigned LtoO;
   unsigned Optimize;
   unsigned ThinLtoJobs;
+  uint64_t InitialFileOffset = 0;
+  std::function<void(uint8_t*, void*)> OPreWrite;
 };
 
 // The only instance of Configuration struct.

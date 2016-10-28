@@ -110,7 +110,7 @@ template <class ELFT> void SymbolTable<ELFT>::addCombinedLtoObject() {
   // Compile bitcode files and replace bitcode symbols.
   Lto.reset(new BitcodeCompiler);
   for (BitcodeFile *F : BitcodeFiles)
-    Lto->add(*F);
+    Lto->add(*F, &HanafudaPatches);
 
   for (InputFile *File : Lto->compile()) {
     ObjectFile<ELFT> *Obj = cast<ObjectFile<ELFT>>(File);

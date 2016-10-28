@@ -14,6 +14,7 @@
 #include "InputFiles.h"
 #include "InputSection.h"
 #include "LinkerScript.h"
+#include "OutputSections.h"
 #include "Strings.h"
 #include "SymbolListFile.h"
 #include "SymbolTable.h"
@@ -50,11 +51,32 @@ namespace hanafuda {
 
 class LinkerDriver;
 
-// Maintains structural information about loaded base file
-// and template for outputting a new file.
-//
-// Capable of resolving original data pointers based on
-// VAs (runtime addresses) loaded from the symbol list.
+/// Maintains structural information about loaded base file
+/// and template for outputting a new file.
+///
+/// Capable of resolving original data pointers based on
+/// VAs (runtime addresses) loaded from the symbol list.
+///
+/// The constructor will try detecting if the DOL's section
+/// layout is consistent with the linker script used with
+/// games built with the official Dolphin SDK:
+/// * T: .init
+/// * D: .extab
+/// * D: .extabinit
+/// * T: .text
+/// * D: .ctors
+/// * D: .dtors
+/// * D: .rodata
+/// * D: .data
+/// * B: .bss
+/// * D: .sdata (optional)
+/// * D: .sdata2 (optional)
+///
+/// When generating a patched DOL, an additional text and data
+/// section is appended to store additional binary components
+/// while not disturbing existing VAs. Due to this, additional
+/// .bss input sections will be relocated into the patching
+/// .data section with a zeroed-out buffer.
 class DOLFile {
   MemoryBufferRef MB;
 public:
@@ -96,11 +118,12 @@ private:
       }
     }
   };
-  Section Texts[7];
-  Section Datas[11];
-  uint32_t BssAddr;
-  uint32_t BssSize;
-  uint32_t EntryPoint;
+  Section Texts[7] = {};
+  Section Datas[11] = {};
+  uint32_t BssAddr = 0;
+  uint32_t BssSize = 0;
+  uint32_t EntryPoint = 0;
+  bool DolphinSections = false;
 
   std::unordered_multimap<uint32_t, uint32_t> OrigCallAddrToInstFileOffs;
   void scanForRelocations(LinkerDriver &Drv);
@@ -110,7 +133,8 @@ public:
     Header head = *reinterpret_cast<const Header*>(M.getBufferStart());
     head.swapBig();
 
-    for (int i = 0; i < 7; ++i) {
+    int i;
+    for (i = 0; i < 7; ++i) {
       if (head.TextOffs[i]) {
         Section& sec = Texts[i];
         sec.Offset = head.TextOffs[i];
@@ -119,20 +143,38 @@ public:
       }
     }
 
-    for (int i = 0; i < 11; ++i) {
-      if (head.DataOffs[i]) {
-        Section& sec = Datas[i];
-        sec.Offset = head.DataOffs[i];
-        sec.Addr = head.DataLoads[i];
-        sec.Length = head.DataSizes[i];
+    int j;
+    for (j = 0; j < 11; ++j) {
+      if (head.DataOffs[j]) {
+        Section& sec = Datas[j];
+        sec.Offset = head.DataOffs[j];
+        sec.Addr = head.DataLoads[j];
+        sec.Length = head.DataSizes[j];
       }
     }
+
+    if (i >= 2 && j >= 6)
+      DolphinSections = true;
 
     BssAddr = head.BssAddr;
     BssSize = head.BssSize;
     EntryPoint = head.EntryPoint;
 
     scanForRelocations(Drv);
+  }
+
+  int getTextSectionCount() const {
+    for (int i = 0; i < 7; ++i)
+      if (!Texts[i].Offset)
+        return i;
+    return 7;
+  }
+
+  int getDataSectionCount() const {
+    for (int i = 0; i < 11; ++i)
+      if (!Datas[i].Offset)
+        return i;
+    return 11;
   }
 
   int getUnusedTextSectionIndex() const {
@@ -151,15 +193,107 @@ public:
 
   const Section& getTextSection(int index) const { return Texts[index]; }
   const Section& getDataSection(int index) const { return Datas[index]; }
+  Section& getTextSection(int index) { return Texts[index]; }
+  Section& getDataSection(int index) { return Datas[index]; }
 
-  StringRef getTextSectionData(int index) const {
+  uint32_t getUnallocatedFileOffset() const {
+    uint32_t Offset = 0;
+    for (int i = 0; i < 7; ++i) {
+      const Section& sec = getTextSection(i);
+      Offset = std::max(Offset, sec.Offset + sec.Length);
+    }
+    for (int i = 0; i < 11; ++i) {
+      const Section& sec = getDataSection(i);
+      Offset = std::max(Offset, sec.Offset + sec.Length);
+    }
+    return (Offset + 31) & ~31;
+  }
+
+  uint32_t getUnallocatedAddressOffset() const {
+    uint32_t Offset = 0;
+    for (int i = 0; i < 7; ++i) {
+      const Section& sec = getTextSection(i);
+      Offset = std::max(Offset, sec.Addr + sec.Length);
+    }
+    for (int i = 0; i < 11; ++i) {
+      const Section& sec = getDataSection(i);
+      Offset = std::max(Offset, sec.Addr + sec.Length);
+    }
+    return (Offset + 31) & ~31;
+  }
+
+  StringRef _getTextSectionData(int index) const {
     const Section& sec = getTextSection(index);
+    if (!sec.Offset)
+      return {};
     return MB.getBuffer().substr(sec.Offset, sec.Length);
   }
 
-  StringRef getDataSectionData(int index) const {
+  StringRef _getDataSectionData(int index) const {
     const Section& sec = getDataSection(index);
+    if (!sec.Offset)
+      return {};
     return MB.getBuffer().substr(sec.Offset, sec.Length);
+  }
+
+  StringRef getInitSectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getTextSectionData(0);
+  }
+
+  StringRef getExtabSectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getDataSectionData(0);
+  }
+
+  StringRef getExtabInitSectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getDataSectionData(1);
+  }
+
+  StringRef getTextSectionData() const {
+    if (!DolphinSections)
+      return _getTextSectionData(0);
+    return _getTextSectionData(1);
+  }
+
+  StringRef getCtorsSectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getDataSectionData(2);
+  }
+
+  StringRef getDtorsSectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getDataSectionData(3);
+  }
+
+  StringRef getRoDataSectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getDataSectionData(4);
+  }
+
+  StringRef getDataSectionData() const {
+    if (!DolphinSections)
+      return _getDataSectionData(0);
+    return _getDataSectionData(5);
+  }
+
+  StringRef getSDataSectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getDataSectionData(6);
+  }
+
+  StringRef getSData2SectionData() const {
+    if (!DolphinSections)
+      return {};
+    return _getDataSectionData(7);
   }
 
   bool validateSymbolAddr(uint32_t addr, HanafudaSecType& secOut, int& secIdxOut) const {
@@ -204,6 +338,36 @@ public:
 
   void replaceTargetAddressRelocations(LinkerDriver &Drv,
                                        uint32_t oldAddr, uint32_t newAddr);
+
+  void writeTo(uint8_t *BufData) const {
+    Header SwappedHead = {};
+    SwappedHead.BssAddr = BssAddr;
+    SwappedHead.BssSize = BssSize;
+    SwappedHead.EntryPoint = EntryPoint;
+
+    for (int i = 0; i < 7; ++i) {
+      const Section& sec = getTextSection(i);
+      if (!sec.Offset)
+        continue;
+      SwappedHead.TextOffs[i] = sec.Offset;
+      SwappedHead.TextLoads[i] = sec.Addr;
+      SwappedHead.TextSizes[i] = sec.Length;
+      memmove(BufData + sec.Offset, _getTextSectionData(i).data(), sec.Length);
+    }
+
+    for (int i = 0; i < 11; ++i) {
+      const Section& sec = getDataSection(i);
+      if (!sec.Offset)
+        continue;
+      SwappedHead.DataOffs[i] = sec.Offset;
+      SwappedHead.DataLoads[i] = sec.Addr;
+      SwappedHead.DataSizes[i] = sec.Length;
+      memmove(BufData + sec.Offset, _getDataSectionData(i).data(), sec.Length);
+    }
+
+    SwappedHead.swapBig();
+    memmove(BufData, &SwappedHead, sizeof(SwappedHead));
+  }
 };
 
 class SymbolListFile {
@@ -410,10 +574,32 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   }
   StringRef dolArg = Args.getLastArgValue(OPT_hanafuda_base_dol);
 
+  // Setup disassembler and code emitter context for performing instruction patching
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllDisassemblers();
+  llvm::InitializeAllTargetInfos();
+  std::string err;
+  std::string TT = "powerpc-unknown-hanafuda-eabi";
+  std::string CPU = "750cl";
+  const llvm::Target *TheTarget = TargetRegistry::lookupTarget(TT, err);
+  STI.reset(TheTarget->createMCSubtargetInfo(TT, CPU, ""));
+  MRI.reset(TheTarget->createMCRegInfo(TT));
+  MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT));
+  MCII.reset(TheTarget->createMCInstrInfo());
+  Ctx = make_unique<MCContext>(MAI.get(), MRI.get(), nullptr);
+  DC.reset(TheTarget->createMCDisassembler(*STI, *Ctx));
+  MCE.reset(TheTarget->createMCCodeEmitter(*MCII, *MRI, *Ctx));
+
   // Read .dol to driver-owned buffer
   Optional<MemoryBufferRef> dolBuffer = readFile(dolArg);
   if (!dolBuffer.hasValue()) return;
   DolFile.emplace(dolBuffer.getValue(), *this);
+
+  if (DolFile->getUnusedTextSectionIndex() == -1 ||
+      DolFile->getUnusedDataSectionIndex() == -1) {
+    error("unable to allocate additional section data in " + dolArg);
+    return;
+  }
 
   if (const char *Path = getReproduceOption(Args)) {
     // Note that --reproduce is a debug option so you can ignore it
@@ -432,21 +618,10 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   initLLVM(Args);
   createFiles(Args);
   checkOptions(Args);
+  Config->EKind = ELF32BEKind;
+  Config->EMachine = EM_PPC;
   if (HasError)
     return;
-
-  // Setup disassembler and code emitter context for performing instruction patching
-  std::string err;
-  std::string TT = "powerpc-unknown-hanafuda-eabi";
-  std::string CPU = "750cl";
-  const llvm::Target *TheTarget = TargetRegistry::lookupTarget(TT, err);
-  STI.reset(TheTarget->createMCSubtargetInfo(TT, CPU, ""));
-  MRI.reset(TheTarget->createMCRegInfo(TT));
-  MAI.reset(TheTarget->createMCAsmInfo(*MRI, TT));
-  MCII.reset(TheTarget->createMCInstrInfo());
-  Ctx = make_unique<MCContext>(MAI.get(), MRI.get(), nullptr);
-  DC.reset(TheTarget->createMCDisassembler(*STI, *Ctx));
-  MCE.reset(TheTarget->createMCCodeEmitter(*MCII, *MRI, *Ctx));
 
   // Do actual link, merging base symbols with linked symbols
   link(Args);
@@ -475,7 +650,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   HanafudaSymbolTable Symtab(*this);
   elf::Symtab<ELF32BE>::X = &Symtab;
 
-  // Load symbol list if provided and populate Symtab
+  // Load .dol symbol list if provided and populate Symtab
   if (Args.hasArg(OPT_hanafuda_dol_symbol_list)) {
     StringRef dolListArg = Args.getLastArgValue(OPT_hanafuda_dol_symbol_list);
     Optional<MemoryBufferRef> dolListBuffer = readFile(dolListArg);
@@ -494,8 +669,71 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     }
   }
 
+  // Configure text/data/bss for hanafuda
+  ScriptConfig->HasSections = true;
+  Config->OFormatBinary = true;
+  Config->InitialFileOffset = DolFile->getUnallocatedFileOffset();
+  uint64_t unallocStartAddr = DolFile->getUnallocatedAddressOffset();
+  Config->OPreWrite = [&](uint8_t *BufData, void *OutSecs) {
+    // I'm called after lld has assigned file offsets and VAs to new output sections,
+    // and before the file buffer has been committed to disk
+    std::vector<OutputSectionBase<ELF32BE>*> &OutputSections =
+        *reinterpret_cast<std::vector<OutputSectionBase<ELF32BE>*>*>(OutSecs);
+
+    // Add new text and data section to .dol
+    int TextSecIdx = DolFile->getUnusedTextSectionIndex();
+    int DataSecIdx = DolFile->getUnusedDataSectionIndex();
+    DOLFile::Section &TextSec = DolFile->getTextSection(TextSecIdx);
+    DOLFile::Section &DataSec = DolFile->getDataSection(DataSecIdx);
+
+    // Fill in header information
+    for (OutputSectionBase<ELF32BE> *Sec : OutputSections) {
+      OutputSection<ELF32BE> *RegSec = dyn_cast<OutputSection<ELF32BE>>(Sec);
+      if (!RegSec)
+        continue;
+      if (RegSec->getName() == ".htext") {
+        TextSec.Offset = RegSec->getFileOff();
+        TextSec.Addr = RegSec->getVA();
+        TextSec.Length = RegSec->getSize();
+      } else if (RegSec->getName() == ".hdata") {
+        DataSec.Offset = RegSec->getFileOff();
+        DataSec.Addr = RegSec->getVA();
+        DataSec.Length = RegSec->getSize();
+      }
+    }
+
+    // Write existing .dol buffer first
+    DolFile->writeTo(BufData);
+
+    // When this returns, lld will write out the relocated patch sections
+  };
+
+  // Programmatically configure hanafuda linker script
+  {
+    std::unique_ptr<OutputSectionCommand> TextOut = make_unique<OutputSectionCommand>(".htext");
+    std::unique_ptr<InputSectionDescription> TextIn = make_unique<InputSectionDescription>("*");
+    TextIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".text", ".text.*"}));
+    TextIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
+    TextIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
+    TextOut->Commands.push_back(std::move(TextIn));
+
+    std::unique_ptr<OutputSectionCommand> DataOut = make_unique<OutputSectionCommand>(".hdata");
+    std::unique_ptr<InputSectionDescription> DataIn = make_unique<InputSectionDescription>("*");
+    DataIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".data", ".data.*", ".bss"}));
+    DataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
+    DataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
+    TextOut->Commands.push_back(std::move(DataIn));
+
+    TextOut->AddrExpr = [=](uint64_t) { return unallocStartAddr; };
+    DataOut->AddrExpr = [=](uint64_t Dot) { return (Dot + 31) & ~31; };
+
+    ScriptConfig->Commands.push_back(std::move(TextOut));
+    ScriptConfig->Commands.push_back(std::move(DataOut));
+  }
+
+  // Proceed with standard linker flow
   std::unique_ptr<TargetInfo> TI(createTarget());
-  TargetInfo *Target = TI.get();
+  lld::elf::Target = TI.get();
   LinkerScript<ELF32BE> LS;
   ScriptBase = Script<ELF32BE>::X = &LS;
 
@@ -515,16 +753,16 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     StringRef S = Arg->getValue();
     if (S.getAsInteger(0, Config->ImageBase))
       error(Arg->getSpelling() + ": number expected, but got " + S);
-    else if ((Config->ImageBase % Target->MaxPageSize) != 0)
+    else if ((Config->ImageBase % lld::elf::Target->MaxPageSize) != 0)
       warn(Arg->getSpelling() + ": address isn't multiple of page size");
   } else {
-    Config->ImageBase = Config->Pic ? 0 : Target->DefaultImageBase;
+    Config->ImageBase = Config->Pic ? 0 : lld::elf::Target->DefaultImageBase;
   }
 
   // Initialize Config->MaxPageSize. The default value is defined by
   // the target, but it can be overriden using the option.
   Config->MaxPageSize =
-      getZOptionValue(Args, "max-page-size", Target->MaxPageSize);
+      getZOptionValue(Args, "max-page-size", lld::elf::Target->MaxPageSize);
   if (!isPowerOf2_64(Config->MaxPageSize))
     error("max-page-size: value isn't a power of 2");
 
@@ -561,6 +799,9 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   Symtab.scanVersionScript();
 
   Symtab.addCombinedLtoObject();
+  for (const auto& patch : Symtab.getHanafudaPatches()) {
+    printf("%s %s\n", patch.first().data(), patch.second.c_str());
+  }
   if (HasError)
     return;
 
