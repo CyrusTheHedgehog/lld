@@ -673,7 +673,8 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   ScriptConfig->HasSections = true;
   Config->OFormatBinary = true;
   Config->InitialFileOffset = DolFile->getUnallocatedFileOffset();
-  uint64_t unallocStartAddr = DolFile->getUnallocatedAddressOffset();
+  Config->InitialAddrOffset = DolFile->getUnallocatedAddressOffset();
+  Config->CommonAlignment = 32;
   Config->OPreWrite = [&](uint8_t *BufData, void *OutSecs) {
     // I'm called after lld has assigned file offsets and VAs to new output sections,
     // and before the file buffer has been committed to disk
@@ -688,17 +689,18 @@ void LinkerDriver::link(opt::InputArgList &Args) {
 
     // Fill in header information
     for (OutputSectionBase<ELF32BE> *Sec : OutputSections) {
-      OutputSection<ELF32BE> *RegSec = dyn_cast<OutputSection<ELF32BE>>(Sec);
-      if (!RegSec)
+      if (!Sec->getFileOff())
         continue;
-      if (RegSec->getName() == ".htext") {
-        TextSec.Offset = RegSec->getFileOff();
-        TextSec.Addr = RegSec->getVA();
-        TextSec.Length = RegSec->getSize();
-      } else if (RegSec->getName() == ".hdata") {
-        DataSec.Offset = RegSec->getFileOff();
-        DataSec.Addr = RegSec->getVA();
-        DataSec.Length = RegSec->getSize();
+      if (Sec->getName() == ".htext") {
+        TextSec.Offset = Sec->getFileOff();
+        TextSec.Addr = Sec->getVA();
+        TextSec.Length = Sec->getSize();
+      } else {
+        if (!DataSec.Offset) {
+          DataSec.Offset = Sec->getFileOff();
+          DataSec.Addr = Sec->getVA();
+        }
+        DataSec.Length = Sec->getFileOff() - DataSec.Offset + Sec->getSize();
       }
     }
 
@@ -724,8 +726,9 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     DataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     TextOut->Commands.push_back(std::move(DataIn));
 
-    TextOut->AddrExpr = [=](uint64_t) { return unallocStartAddr; };
-    DataOut->AddrExpr = [=](uint64_t Dot) { return (Dot + 31) & ~31; };
+    auto Align32Expr = [=](uint64_t Dot) { return (Dot + 31) & ~31; };
+    TextOut->AddrExpr = Align32Expr;
+    DataOut->AddrExpr = Align32Expr;
 
     ScriptConfig->Commands.push_back(std::move(TextOut));
     ScriptConfig->Commands.push_back(std::move(DataOut));
@@ -828,7 +831,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   }
 
   // Write the result to the file.
-  writeResult<ELF32BE>();
+  writeDolResult<ELF32BE>();
 }
 
 }

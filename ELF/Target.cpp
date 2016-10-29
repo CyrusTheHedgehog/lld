@@ -47,6 +47,7 @@ namespace elf {
 TargetInfo *Target;
 
 static void or32le(uint8_t *P, int32_t V) { write32le(P, read32le(P) | V); }
+static void or32be(uint8_t *P, int32_t V) { write32be(P, read32be(P) | V); }
 
 StringRef getRelName(uint32_t Type) {
   return getELFRelocationTypeName(Config->EMachine, Type);
@@ -965,18 +966,12 @@ void PPCTargetInfo::relocateOne(uint8_t *Loc, uint32_t Type,
   case R_PPC_ADDR16_LO:
     write16be(Loc, applyPPCLo(Val));
     break;
-  case R_PPC_REL24: {
-    int32_t &Target = *reinterpret_cast<int32_t*>(Loc);
-    int32_t OrigVal = byte_swap<int32_t, llvm::support::big>(Target);
-    OrigVal |= (Val << 2) & 0x3FFFFFC;
-    Target = byte_swap<int32_t, llvm::support::big>(OrigVal);
+  case R_PPC_REL24:
+    or32be(Loc, Val & 0x3FFFFFC);
     break;
-  }
-  case R_PPC_REL32: {
-    int32_t &Target = *reinterpret_cast<int32_t*>(Loc);
-    Target = byte_swap<int32_t, llvm::support::big>(Val);
+  case R_PPC_REL32:
+    write32be(Loc, Val);
     break;
-  }
   default:
     fatal("unrecognized reloc " + Twine(Type));
   }

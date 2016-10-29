@@ -147,6 +147,8 @@ struct Configuration {
   unsigned Optimize;
   unsigned ThinLtoJobs;
   uint64_t InitialFileOffset = 0;
+  uint64_t InitialAddrOffset = 0;
+  uint64_t CommonAlignment = 1;
   std::function<void(uint8_t*, void*)> OPreWrite;
 };
 

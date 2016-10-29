@@ -22,6 +22,7 @@ template <class ELFT> class InputSectionBase;
 template <class ELFT> class ObjectFile;
 template <class ELFT> class SymbolTable;
 template <class ELFT> void writeResult();
+template <class ELFT> void writeDolResult();
 template <class ELFT> void markLive();
 template <class ELFT> bool isRelroSection(OutputSectionBase<ELFT> *Sec);
 

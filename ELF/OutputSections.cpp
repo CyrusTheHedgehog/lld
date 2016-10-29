@@ -1219,7 +1219,7 @@ template <class ELFT> void EhOutputSection<ELFT>::finalize() {
       Off += alignTo(Fde->size(), sizeof(uintX_t));
     }
   }
-  this->Header.sh_size = Off;
+  this->Header.sh_size = alignTo(Off, Config->CommonAlignment);
 }
 
 template <class ELFT> static uint64_t readFdeAddr(uint8_t *Buf, int Size) {

@@ -246,6 +246,128 @@ template <class ELFT> void elf::writeResult() {
   Out<ELFT>::Pool.clear();
 }
 
+template <class ELFT> void elf::writeDolResult() {
+  typedef typename ELFT::uint uintX_t;
+  typedef typename ELFT::Ehdr Elf_Ehdr;
+
+  // Create singleton output sections.
+  OutputSection<ELFT> Bss(".bss", SHT_NOBITS, SHF_ALLOC | SHF_WRITE);
+  DynamicSection<ELFT> Dynamic;
+  EhOutputSection<ELFT> EhFrame;
+  GotSection<ELFT> Got;
+  PltSection<ELFT> Plt;
+  RelocationSection<ELFT> RelaDyn(Config->Rela ? ".rela.dyn" : ".rel.dyn",
+                                  Config->ZCombreloc);
+  StringTableSection<ELFT> ShStrTab(".shstrtab", false);
+  VersionTableSection<ELFT> VerSym;
+  VersionNeedSection<ELFT> VerNeed;
+
+  OutputSectionBase<ELFT> ElfHeader("", 0, SHF_ALLOC);
+  ElfHeader.setSize(sizeof(Elf_Ehdr));
+  OutputSectionBase<ELFT> ProgramHeaders("", 0, SHF_ALLOC);
+  ProgramHeaders.updateAlignment(sizeof(uintX_t));
+
+  // Instantiate optional output sections if they are needed.
+  std::unique_ptr<InterpSection<ELFT>> Interp;
+  std::unique_ptr<BuildIdSection<ELFT>> BuildId;
+  std::unique_ptr<StringTableSection<ELFT>> DynStrTab;
+  std::unique_ptr<SymbolTableSection<ELFT>> DynSymTab;
+  std::unique_ptr<EhFrameHeader<ELFT>> EhFrameHdr;
+  std::unique_ptr<GdbIndexSection<ELFT>> GdbIndex;
+  std::unique_ptr<GnuHashTableSection<ELFT>> GnuHashTab;
+  std::unique_ptr<GotPltSection<ELFT>> GotPlt;
+  std::unique_ptr<HashTableSection<ELFT>> HashTab;
+  std::unique_ptr<RelocationSection<ELFT>> RelaPlt;
+  std::unique_ptr<StringTableSection<ELFT>> StrTab;
+  std::unique_ptr<SymbolTableSection<ELFT>> SymTabSec;
+  std::unique_ptr<OutputSection<ELFT>> MipsRldMap;
+  std::unique_ptr<VersionDefinitionSection<ELFT>> VerDef;
+
+  if (needsInterpSection<ELFT>())
+    Interp.reset(new InterpSection<ELFT>);
+
+  if (Config->BuildId == BuildIdKind::Fast)
+    BuildId.reset(new BuildIdFastHash<ELFT>);
+  else if (Config->BuildId == BuildIdKind::Md5)
+    BuildId.reset(new BuildIdMd5<ELFT>);
+  else if (Config->BuildId == BuildIdKind::Sha1)
+    BuildId.reset(new BuildIdSha1<ELFT>);
+  else if (Config->BuildId == BuildIdKind::Uuid)
+    BuildId.reset(new BuildIdUuid<ELFT>);
+  else if (Config->BuildId == BuildIdKind::Hexstring)
+    BuildId.reset(new BuildIdHexstring<ELFT>);
+
+  if (!Symtab<ELFT>::X->getSharedFiles().empty() || Config->Pic) {
+    DynStrTab.reset(new StringTableSection<ELFT>(".dynstr", true));
+    DynSymTab.reset(new SymbolTableSection<ELFT>(*DynStrTab));
+  }
+
+  if (Config->EhFrameHdr)
+    EhFrameHdr.reset(new EhFrameHeader<ELFT>);
+
+  if (Config->GnuHash)
+    GnuHashTab.reset(new GnuHashTableSection<ELFT>);
+  if (Config->SysvHash)
+    HashTab.reset(new HashTableSection<ELFT>);
+  if (Config->GdbIndex)
+    GdbIndex.reset(new GdbIndexSection<ELFT>);
+  StringRef S = Config->Rela ? ".rela.plt" : ".rel.plt";
+  GotPlt.reset(new GotPltSection<ELFT>);
+  RelaPlt.reset(new RelocationSection<ELFT>(S, false /*Sort*/));
+  if (Config->Strip != StripPolicy::All) {
+    StrTab.reset(new StringTableSection<ELFT>(".strtab", false));
+    SymTabSec.reset(new SymbolTableSection<ELFT>(*StrTab));
+  }
+  if (Config->EMachine == EM_MIPS && !Config->Shared) {
+    // This is a MIPS specific section to hold a space within the data segment
+    // of executable file which is pointed to by the DT_MIPS_RLD_MAP entry.
+    // See "Dynamic section" in Chapter 5 in the following document:
+    // ftp://www.linux-mips.org/pub/linux/mips/doc/ABI/mipsabi.pdf
+    MipsRldMap.reset(new OutputSection<ELFT>(".rld_map", SHT_PROGBITS,
+                                             SHF_ALLOC | SHF_WRITE));
+    MipsRldMap->setSize(sizeof(uintX_t));
+    MipsRldMap->updateAlignment(sizeof(uintX_t));
+  }
+  if (!Config->VersionDefinitions.empty())
+    VerDef.reset(new VersionDefinitionSection<ELFT>());
+
+  Out<ELFT>::Bss = &Bss;
+  Out<ELFT>::BuildId = BuildId.get();
+  Out<ELFT>::DynStrTab = DynStrTab.get();
+  Out<ELFT>::DynSymTab = DynSymTab.get();
+  Out<ELFT>::Dynamic = &Dynamic;
+  Out<ELFT>::EhFrame = &EhFrame;
+  Out<ELFT>::EhFrameHdr = EhFrameHdr.get();
+  Out<ELFT>::GdbIndex = GdbIndex.get();
+  Out<ELFT>::GnuHashTab = GnuHashTab.get();
+  Out<ELFT>::Got = &Got;
+  Out<ELFT>::GotPlt = GotPlt.get();
+  Out<ELFT>::HashTab = HashTab.get();
+  Out<ELFT>::Interp = Interp.get();
+  Out<ELFT>::Plt = &Plt;
+  Out<ELFT>::RelaDyn = &RelaDyn;
+  Out<ELFT>::RelaPlt = RelaPlt.get();
+  Out<ELFT>::ShStrTab = &ShStrTab;
+  Out<ELFT>::StrTab = StrTab.get();
+  Out<ELFT>::SymTab = nullptr;
+  Out<ELFT>::VerDef = VerDef.get();
+  Out<ELFT>::VerSym = &VerSym;
+  Out<ELFT>::VerNeed = &VerNeed;
+  Out<ELFT>::MipsRldMap = MipsRldMap.get();
+  Out<ELFT>::Opd = nullptr;
+  Out<ELFT>::OpdBuf = nullptr;
+  Out<ELFT>::TlsPhdr = nullptr;
+  Out<ELFT>::ElfHeader = &ElfHeader;
+  Out<ELFT>::ProgramHeaders = &ProgramHeaders;
+
+  Out<ELFT>::PreinitArray = nullptr;
+  Out<ELFT>::InitArray = nullptr;
+  Out<ELFT>::FiniArray = nullptr;
+
+  Writer<ELFT>().run();
+  Out<ELFT>::Pool.clear();
+}
+
 template <class ELFT> static std::vector<DefinedCommon *> getCommonSymbols() {
   std::vector<DefinedCommon *> V;
   for (Symbol *S : Symtab<ELFT>::X->getSymbols())
@@ -1173,7 +1295,7 @@ template <class ELFT> void Writer<ELFT>::assignAddresses() {
   uintX_t VA = Config->ImageBase + getHeaderSize<ELFT>();
   uintX_t ThreadBssOffset = 0;
   for (OutputSectionBase<ELFT> *Sec : OutputSections) {
-    uintX_t Alignment = Sec->getAlignment();
+    uintX_t Alignment = std::max<uintX_t>(Sec->getAlignment(), Config->CommonAlignment);
     if (Sec->PageAlign)
       Alignment = std::max<uintX_t>(Alignment, Config->MaxPageSize);
 
@@ -1201,7 +1323,7 @@ template <class ELFT> void Writer<ELFT>::assignAddresses() {
 // executables without any address adjustment.
 template <class ELFT, class uintX_t>
 static uintX_t getFileAlignment(uintX_t Off, OutputSectionBase<ELFT> *Sec) {
-  uintX_t Alignment = Sec->getAlignment();
+  uintX_t Alignment = std::max<uintX_t>(Sec->getAlignment(), Config->CommonAlignment);
   if (Sec->PageAlign)
     Alignment = std::max<uintX_t>(Alignment, Config->MaxPageSize);
   Off = alignTo(Off, Alignment);
@@ -1215,7 +1337,7 @@ static uintX_t getFileAlignment(uintX_t Off, OutputSectionBase<ELFT> *Sec) {
   // this formula: Off2 = Off1 + (VA2 - VA1).
   if (Sec == First)
     return alignTo(Off, Target->MaxPageSize, Sec->getVA());
-  return First->getFileOffset() + Sec->getVA() - First->getVA();
+  return alignTo(First->getFileOffset() + Sec->getVA() - First->getVA(), Alignment);
 }
 
 template <class ELFT, class uintX_t>
@@ -1496,6 +1618,8 @@ template void elf::writeResult<ELF32LE>();
 template void elf::writeResult<ELF32BE>();
 template void elf::writeResult<ELF64LE>();
 template void elf::writeResult<ELF64BE>();
+
+template void elf::writeDolResult<ELF32BE>();
 
 template struct elf::PhdrEntry<ELF32LE>;
 template struct elf::PhdrEntry<ELF32BE>;
