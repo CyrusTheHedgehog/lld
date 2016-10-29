@@ -974,7 +974,7 @@ void PPCTargetInfo::relocateOne(uint8_t *Loc, uint32_t Type,
   }
   case R_PPC_REL32: {
     int32_t &Target = *reinterpret_cast<int32_t*>(Loc);
-    Target = Val;
+    Target = byte_swap<int32_t, llvm::support::big>(Val);
     break;
   }
   default:
