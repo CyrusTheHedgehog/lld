@@ -132,7 +132,7 @@ static unsigned handleTlsRelocation(uint32_t Type, SymbolBody &Body,
                                     InputSectionBase<ELFT> &C,
                                     typename ELFT::uint Offset,
                                     typename ELFT::uint Addend, RelExpr Expr) {
-  if (!(C.getSectionHdr()->sh_flags & SHF_ALLOC))
+  if (!(C.Flags & SHF_ALLOC))
     return 0;
 
   if (!Body.isTls())
@@ -286,6 +286,10 @@ template <class ELFT> static bool isAbsolute(const SymbolBody &Body) {
   return false;
 }
 
+template <class ELFT> static bool isAbsoluteValue(const SymbolBody &Body) {
+  return isAbsolute<ELFT>(Body) || Body.isTls();
+}
+
 static bool needsPlt(RelExpr Expr) {
   return Expr == R_PLT_PC || Expr == R_PPC_PLT_OPD || Expr == R_PLT ||
          Expr == R_PLT_PAGE_PC || Expr == R_THUNK_PLT_PC;
@@ -322,7 +326,7 @@ static bool isStaticLinkTimeConstant(RelExpr E, uint32_t Type,
   if (!Config->Pic)
     return true;
 
-  bool AbsVal = isAbsolute<ELFT>(Body) || Body.isTls();
+  bool AbsVal = isAbsoluteValue<ELFT>(Body);
   bool RelE = isRelExpr(E);
   if (AbsVal && !RelE)
     return true;
@@ -433,7 +437,7 @@ static RelExpr adjustExpr(const elf::ObjectFile<ELFT> &File, SymbolBody &Body,
   } else if (!Preemptible) {
     if (needsPlt(Expr))
       Expr = fromPlt(Expr);
-    if (Expr == R_GOT_PC)
+    if (Expr == R_GOT_PC && !isAbsoluteValue<ELFT>(Body))
       Expr = Target->adjustRelaxExpr(Type, Data, Expr);
   }
   Expr = Target->getThunkExpr(Expr, Type, File, Body);
@@ -522,7 +526,49 @@ static typename ELFT::uint computeAddend(const elf::ObjectFile<ELFT> &File,
   return Addend;
 }
 
-static void reportUndefined(SymbolBody &Sym) {
+// Find symbol that encloses given offset. Used for error reporting.
+template <class ELFT>
+static DefinedRegular<ELFT> *getSymbolAt(InputSectionBase<ELFT> *S,
+                                         typename ELFT::uint Offset) {
+  for (SymbolBody *B : S->getFile()->getSymbols())
+    if (auto *D = dyn_cast<DefinedRegular<ELFT>>(B))
+      if (D->Value <= Offset && D->Value + D->Size > Offset && D->Section == S)
+        return D;
+
+  return nullptr;
+}
+
+template <class ELFT>
+static std::string getLocation(SymbolBody &Sym, InputSectionBase<ELFT> &S,
+                               typename ELFT::uint Offset) {
+  ObjectFile<ELFT> *File = S.getFile();
+
+  // First check if we can get desired values from debugging information.
+  std::string LineInfo = File->getDIHelper()->getLineInfo(Offset);
+  if (!LineInfo.empty())
+    return LineInfo;
+
+  // If don't have STT_FILE typed symbol in object file then
+  // use object file name.
+  std::string SrcFile = File->SourceFile;
+  if (SrcFile.empty())
+    SrcFile = Sym.File ? getFilename(Sym.File) : getFilename(File);
+
+  // Find a symbol at a given location.
+  DefinedRegular<ELFT> *Encl = getSymbolAt(&S, Offset);
+  if (Encl && Encl->Type == STT_FUNC) {
+    StringRef Func = getSymbolName(*File, *Encl);
+    return SrcFile + " (function " + maybeDemangle(Func) + ")";
+  }
+
+  // If there's no symbol, print out the offset instead of a symbol name.
+  return (SrcFile + " (" + S.Name + "+0x" + Twine::utohexstr(Offset) + ")")
+      .str();
+}
+
+template <class ELFT>
+static void reportUndefined(SymbolBody &Sym, InputSectionBase<ELFT> &S,
+                            typename ELFT::uint Offset) {
   if (Config->UnresolvedSymbols == UnresolvedPolicy::Ignore)
     return;
 
@@ -530,11 +576,9 @@ static void reportUndefined(SymbolBody &Sym) {
       Config->UnresolvedSymbols != UnresolvedPolicy::NoUndef)
     return;
 
-  std::string Msg = "undefined symbol: ";
-  Msg += Config->Demangle ? demangle(Sym.getName()) : Sym.getName().str();
+  std::string Msg = getLocation(Sym, S, Offset) + ": undefined symbol '" +
+                    maybeDemangle(Sym.getName()) + "'";
 
-  if (Sym.File)
-    Msg += " in " + getFilename(Sym.File);
   if (Config->UnresolvedSymbols == UnresolvedPolicy::Warn)
     warn(Msg);
   else
@@ -558,7 +602,7 @@ template <class ELFT, class RelTy>
 static void scanRelocs(InputSectionBase<ELFT> &C, ArrayRef<RelTy> Rels) {
   typedef typename ELFT::uint uintX_t;
 
-  bool IsWrite = C.getSectionHdr()->sh_flags & SHF_WRITE;
+  bool IsWrite = C.Flags & SHF_WRITE;
 
   auto AddDyn = [=](const DynamicReloc<ELFT> &Reloc) {
     Out<ELFT>::RelaDyn->addReloc(Reloc);
@@ -583,7 +627,7 @@ static void scanRelocs(InputSectionBase<ELFT> &C, ArrayRef<RelTy> Rels) {
     // We only report undefined symbols if they are referenced somewhere in the
     // code.
     if (!Body.isLocal() && Body.isUndefined() && !Body.symbol()->isWeak())
-      reportUndefined(Body);
+      reportUndefined(Body, C, RI.r_offset);
 
     RelExpr Expr = Target->getRelExpr(Type, Body);
     bool Preemptible = isPreemptible(Body, Type);

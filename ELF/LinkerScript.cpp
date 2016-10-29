@@ -21,11 +21,12 @@
 #include "Config.h"
 #include "Driver.h"
 #include "InputSection.h"
+#include "Memory.h"
 #include "OutputSections.h"
 #include "ScriptParser.h"
 #include "Strings.h"
-#include "Symbols.h"
 #include "SymbolTable.h"
+#include "Symbols.h"
 #include "Target.h"
 #include "Writer.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -33,7 +34,6 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
-#include "llvm/Support/StringSaver.h"
 
 using namespace llvm;
 using namespace llvm::ELF;
@@ -46,7 +46,8 @@ LinkerScriptBase *elf::ScriptBase;
 ScriptConfiguration *elf::ScriptConfig;
 
 template <class ELFT> static void addRegular(SymbolAssignment *Cmd) {
-  Symbol *Sym = Symtab<ELFT>::X->addRegular(Cmd->Name, STB_GLOBAL, STV_DEFAULT);
+  Symbol *Sym = Symtab<ELFT>::X->addRegular(Cmd->Name, STV_DEFAULT, nullptr,
+                                            STB_GLOBAL, STT_NOTYPE, 0);
   Sym->Visibility = Cmd->Hidden ? STV_HIDDEN : STV_DEFAULT;
   Cmd->Sym = Sym->body();
 
@@ -156,7 +157,7 @@ static bool matchConstraints(ArrayRef<InputSectionBase<ELFT> *> Sections,
     return true;
   bool IsRW = llvm::any_of(Sections, [=](InputSectionData *Sec2) {
     auto *Sec = static_cast<InputSectionBase<ELFT> *>(Sec2);
-    return Sec->getSectionHdr()->sh_flags & SHF_WRITE;
+    return Sec->Flags & SHF_WRITE;
   });
   return (IsRW && Kind == ConstraintKind::ReadWrite) ||
          (!IsRW && Kind == ConstraintKind::ReadOnly);
@@ -184,7 +185,7 @@ void LinkerScript<ELFT>::computeInputSections(InputSectionDescription *I) {
         if (!isDiscarded(S) && !S->OutSec && Pat.SectionRe.match(S->Name))
           I->Sections.push_back(S);
       if (Pat.SectionRe.match("COMMON"))
-        I->Sections.push_back(CommonInputSection<ELFT>::X);
+        I->Sections.push_back(InputSection<ELFT>::CommonInputSection);
     }
 
     // Sort sections as instructed by SORT-family commands and --sort-section
@@ -268,13 +269,12 @@ static SectionKey<ELFT::Is64Bits> createKey(InputSectionBase<ELFT> *C,
   // Fortunately, creating symbols in the middle of a merge section is not
   // supported by bfd or gold, so we can just create multiple section in that
   // case.
-  const typename ELFT::Shdr *H = C->getSectionHdr();
   typedef typename ELFT::uint uintX_t;
-  uintX_t Flags = H->sh_flags & (SHF_MERGE | SHF_STRINGS);
+  uintX_t Flags = C->Flags & (SHF_MERGE | SHF_STRINGS);
 
   uintX_t Alignment = 0;
   if (isa<MergeInputSection<ELFT>>(C))
-    Alignment = std::max(H->sh_addralign, H->sh_entsize);
+    Alignment = std::max<uintX_t>(C->Alignment, C->Entsize);
 
   return SectionKey<ELFT::Is64Bits>{OutsecName, /*Type*/ 0, Flags, Alignment};
 }
@@ -351,7 +351,7 @@ void LinkerScript<ELFT>::createSections(OutputSectionFactory<ELFT> &Factory) {
   for (ObjectFile<ELFT> *F : Symtab<ELFT>::X->getObjectFiles())
     for (InputSectionBase<ELFT> *S : F->getSections())
       if (!isDiscarded(S) && !S->OutSec)
-        addSection(Factory, S, getOutputSectionName(S->Name, Opt.Alloc));
+        addSection(Factory, S, getOutputSectionName(S->Name));
 }
 
 // Sets value of a section-defined symbol. Two kinds of
@@ -954,7 +954,6 @@ private:
   void readLocal();
 
   ScriptConfiguration &Opt = *ScriptConfig;
-  StringSaver Saver = {ScriptConfig->Alloc};
   bool IsUnderSysroot;
 };
 

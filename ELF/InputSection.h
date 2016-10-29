@@ -60,6 +60,12 @@ public:
   StringRef Name;
   ArrayRef<uint8_t> Data;
 
+  template <typename T> llvm::ArrayRef<T> getDataAs() const {
+    size_t S = Data.size();
+    assert(S % sizeof(T) == 0);
+    return llvm::makeArrayRef<T>((const T *)Data.data(), S / sizeof(T));
+  }
+
   // If a section is compressed, this has the uncompressed section data.
   std::unique_ptr<uint8_t[]> UncompressedData;
 
@@ -75,18 +81,28 @@ protected:
   typedef typename ELFT::Shdr Elf_Shdr;
   typedef typename ELFT::Sym Elf_Sym;
   typedef typename ELFT::uint uintX_t;
-  const Elf_Shdr *Header;
 
   // The file this section is from.
   ObjectFile<ELFT> *File;
 
 public:
+  // These corresponds to the fields in Elf_Shdr.
+  uintX_t Flags;
+  uintX_t Entsize;
+  uint32_t Type;
+  uint32_t Link;
+  uint32_t Info;
+
   InputSectionBase()
       : InputSectionData(Regular, "", ArrayRef<uint8_t>(), false, false),
         Repl(this) {}
 
   InputSectionBase(ObjectFile<ELFT> *File, const Elf_Shdr *Header,
                    StringRef Name, Kind SectionKind);
+  InputSectionBase(ObjectFile<ELFT> *File, uintX_t Flags, uint32_t Type,
+                   uintX_t Entsize, uint32_t Link, uint32_t Info,
+                   uintX_t Addralign, ArrayRef<uint8_t> Data, StringRef Name,
+                   Kind SectionKind);
   OutputSectionBase<ELFT> *OutSec = nullptr;
 
   // This pointer points to the "real" instance of this instance.
@@ -101,7 +117,6 @@ public:
 
   static InputSectionBase<ELFT> Discarded;
 
-  const Elf_Shdr *getSectionHdr() const { return Header; }
   ObjectFile<ELFT> *getFile() const { return File; }
   uintX_t getOffset(const DefinedRegular<ELFT> &Sym) const;
   InputSectionBase *getLinkOrderDep() const;
@@ -147,12 +162,12 @@ template <class ELFT> class MergeInputSection : public InputSectionBase<ELFT> {
 public:
   MergeInputSection(ObjectFile<ELFT> *F, const Elf_Shdr *Header,
                     StringRef Name);
-  static bool classof(const InputSectionBase<ELFT> *S);
+  static bool classof(const InputSectionData *S);
   void splitIntoPieces();
 
   // Mark the piece at a given offset live. Used by GC.
   void markLiveAt(uintX_t Offset) {
-    assert(this->getSectionHdr()->sh_flags & llvm::ELF::SHF_ALLOC);
+    assert(this->Flags & llvm::ELF::SHF_ALLOC);
     LiveOffsets.insert(Offset);
   }
 
@@ -198,7 +213,7 @@ public:
   typedef typename ELFT::Shdr Elf_Shdr;
   typedef typename ELFT::uint uintX_t;
   EhInputSection(ObjectFile<ELFT> *F, const Elf_Shdr *Header, StringRef Name);
-  static bool classof(const InputSectionBase<ELFT> *S);
+  static bool classof(const InputSectionData *S);
   void split();
   template <class RelTy> void split(ArrayRef<RelTy> Rels);
 
@@ -221,6 +236,8 @@ template <class ELFT> class InputSection : public InputSectionBase<ELFT> {
   typedef typename ELFT::uint uintX_t;
 
 public:
+  InputSection(uintX_t Flags, uint32_t Type, uintX_t Addralign,
+               ArrayRef<uint8_t> Data, StringRef Name);
   InputSection(ObjectFile<ELFT> *F, const Elf_Shdr *Header, StringRef Name);
 
   // Write this section to a mmap'ed file, assuming Buf is pointing to
@@ -237,7 +254,7 @@ public:
   // InputSection that is dependent on us (reverse dependency for GC)
   InputSectionBase<ELFT> *DependentSection = nullptr;
 
-  static bool classof(const InputSectionBase<ELFT> *S);
+  static bool classof(const InputSectionData *S);
 
   InputSectionBase<ELFT> *getRelocatedSection();
 
@@ -255,6 +272,14 @@ public:
   template <class RelTy>
   void relocateNonAlloc(uint8_t *Buf, llvm::ArrayRef<RelTy> Rels);
 
+  // Common symbols don't belong to any section. But it is easier for us
+  // to handle them as if they belong to some input section. So we defined
+  // this section that "contains" all common symbols.
+  static InputSection<ELFT> *CommonInputSection;
+
+  static InputSection<ELFT>
+  createCommonInputSection(std::vector<DefinedCommon *> Syms);
+
 private:
   template <class RelTy>
   void copyRelocations(uint8_t *Buf, llvm::ArrayRef<RelTy> Rels);
@@ -267,6 +292,9 @@ private:
 
   llvm::TinyPtrVector<const Thunk<ELFT> *> Thunks;
 };
+
+template <class ELFT>
+InputSection<ELFT> *InputSection<ELFT>::CommonInputSection;
 
 // MIPS .reginfo section provides information on the registers used by the code
 // in the object file. Linker should collect this information and write a single
@@ -281,7 +309,7 @@ class MipsReginfoInputSection : public InputSectionBase<ELFT> {
 public:
   MipsReginfoInputSection(ObjectFile<ELFT> *F, const Elf_Shdr *Hdr,
                           StringRef Name);
-  static bool classof(const InputSectionBase<ELFT> *S);
+  static bool classof(const InputSectionData *S);
 
   const llvm::object::Elf_Mips_RegInfo<ELFT> *Reginfo = nullptr;
 };
@@ -293,7 +321,7 @@ class MipsOptionsInputSection : public InputSectionBase<ELFT> {
 public:
   MipsOptionsInputSection(ObjectFile<ELFT> *F, const Elf_Shdr *Hdr,
                           StringRef Name);
-  static bool classof(const InputSectionBase<ELFT> *S);
+  static bool classof(const InputSectionData *S);
 
   const llvm::object::Elf_Mips_RegInfo<ELFT> *Reginfo = nullptr;
 };
@@ -305,30 +333,10 @@ class MipsAbiFlagsInputSection : public InputSectionBase<ELFT> {
 public:
   MipsAbiFlagsInputSection(ObjectFile<ELFT> *F, const Elf_Shdr *Hdr,
                            StringRef Name);
-  static bool classof(const InputSectionBase<ELFT> *S);
+  static bool classof(const InputSectionData *S);
 
   const llvm::object::Elf_Mips_ABIFlags<ELFT> *Flags = nullptr;
 };
-
-// Common symbols don't belong to any section. But it is easier for us
-// to handle them as if they belong to some input section. So we defined
-// this class. CommonInputSection is a virtual singleton class that
-// "contains" all common symbols.
-template <class ELFT> class CommonInputSection : public InputSection<ELFT> {
-  typedef typename ELFT::uint uintX_t;
-
-public:
-  CommonInputSection(std::vector<DefinedCommon *> Syms);
-
-  // The singleton instance of this class.
-  static CommonInputSection<ELFT> *X;
-
-private:
-  static typename ELFT::Shdr Hdr;
-};
-
-template <class ELFT> CommonInputSection<ELFT> *CommonInputSection<ELFT>::X;
-template <class ELFT> typename ELFT::Shdr CommonInputSection<ELFT>::Hdr;
 
 } // namespace elf
 } // namespace lld

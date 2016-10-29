@@ -70,6 +70,7 @@ struct VersionDefinition {
 // Most fields are initialized by the driver.
 struct Configuration {
   InputFile *FirstElf = nullptr;
+  uint8_t OSABI = 0;
   llvm::StringMap<uint64_t> SectionStartMap;
   llvm::StringRef DynamicLinker;
   llvm::StringRef Entry;
@@ -128,6 +129,7 @@ struct Configuration {
   bool ZNow;
   bool ZOrigin;
   bool ZRelro;
+  bool ExitEarly;
   bool ZWxneeded;
   DiscardPolicy Discard;
   SortSectionPolicy SortSection;

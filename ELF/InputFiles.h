@@ -24,11 +24,11 @@
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ELF.h"
 #include "llvm/Object/IRObjectFile.h"
-#include "llvm/Support/StringSaver.h"
 
 #include <map>
 
 namespace llvm {
+class DWARFDebugLine;
 namespace lto {
 class InputFile;
 }
@@ -37,11 +37,43 @@ class InputFile;
 namespace lld {
 namespace elf {
 
+template <class ELFT> struct GAlloc {
+  static llvm::SpecificBumpPtrAllocator<InputSection<ELFT>> IAlloc;
+  static llvm::SpecificBumpPtrAllocator<MergeInputSection<ELFT>> MAlloc;
+  static llvm::SpecificBumpPtrAllocator<EhInputSection<ELFT>> EHAlloc;
+};
+
+template <class ELFT>
+llvm::SpecificBumpPtrAllocator<InputSection<ELFT>> GAlloc<ELFT>::IAlloc;
+
+template <class ELFT>
+llvm::SpecificBumpPtrAllocator<MergeInputSection<ELFT>> GAlloc<ELFT>::MAlloc;
+
+template <class ELFT>
+llvm::SpecificBumpPtrAllocator<EhInputSection<ELFT>> GAlloc<ELFT>::EHAlloc;
+
 using llvm::object::Archive;
 
 class InputFile;
 class Lazy;
 class SymbolBody;
+
+// Debugging information helper class. The main purpose is to
+// retrieve source file and line for error reporting. Linker may
+// find reasonable number of errors in a single object file, so
+// we cache debugging information in order to parse it only once
+// for each object file we link.
+template <class ELFT> class DIHelper {
+  typedef typename ELFT::uint uintX_t;
+
+public:
+  DIHelper(InputFile *F);
+  ~DIHelper();
+  std::string getLineInfo(uintX_t Offset);
+
+private:
+  std::unique_ptr<llvm::DWARFDebugLine> DwarfLine;
+};
 
 // The root class of input files.
 class InputFile {
@@ -77,6 +109,7 @@ public:
   // have ELF type (i.e. ELF{32,64}{LE,BE}) and target machine type.
   ELFKind EKind = ELFNoneKind;
   uint16_t EMachine = llvm::ELF::EM_NONE;
+  uint8_t OSABI = 0;
 
   static void freePool();
 
@@ -111,10 +144,6 @@ public:
 
   const llvm::object::ELFFile<ELFT> &getObj() const { return ELFObj; }
   llvm::object::ELFFile<ELFT> &getObj() { return ELFObj; }
-
-  uint8_t getOSABI() const {
-    return getObj().getHeader()->e_ident[llvm::ELF::EI_OSABI];
-  }
 
   StringRef getStringTable() const { return StringTable; }
 
@@ -171,6 +200,10 @@ public:
 
   const Elf_Shdr *getSymbolTable() const { return this->Symtab; };
 
+  // DI helper allows manipilating debugging information for this
+  // object file. Used for error reporting.
+  DIHelper<ELFT> *getDIHelper();
+
   // Get MIPS GP0 value defined by this file. This value represents the gp value
   // used to create the relocatable object and required to support
   // R_MIPS_GPREL16 / R_MIPS_GPREL32 relocations.
@@ -180,9 +213,10 @@ public:
   // st_name of the symbol.
   std::vector<std::pair<const DefinedRegular<ELFT> *, unsigned>> KeptLocalSyms;
 
-  // SymbolBodies and Thunks for sections in this file are allocated
-  // using this buffer.
-  llvm::BumpPtrAllocator Alloc;
+  // Name of source file obtained from STT_FILE symbol value,
+  // or empty string if there is no such symbol in object file
+  // symbol table.
+  StringRef SourceFile;
 
 private:
   void
@@ -208,9 +242,7 @@ private:
   // MIPS .MIPS.abiflags section defined by this file.
   std::unique_ptr<MipsAbiFlagsInputSection<ELFT>> MipsAbiFlags;
 
-  llvm::SpecificBumpPtrAllocator<InputSection<ELFT>> IAlloc;
-  llvm::SpecificBumpPtrAllocator<MergeInputSection<ELFT>> MAlloc;
-  llvm::SpecificBumpPtrAllocator<EhInputSection<ELFT>> EHAlloc;
+  std::unique_ptr<DIHelper<ELFT>> DIH;
 };
 
 // LazyObjectFile is analogous to ArchiveFile in the sense that
@@ -236,8 +268,6 @@ private:
   template <class ELFT> std::vector<StringRef> getElfSymbols();
   std::vector<StringRef> getBitcodeSymbols();
 
-  llvm::BumpPtrAllocator Alloc;
-  llvm::StringSaver Saver{Alloc};
   bool Seen = false;
 };
 
@@ -270,8 +300,6 @@ public:
 
 private:
   std::vector<Symbol *> Symbols;
-  llvm::BumpPtrAllocator Alloc;
-  llvm::StringSaver Saver{Alloc};
 };
 
 // .so file.
@@ -326,10 +354,11 @@ class BinaryFile : public InputFile {
 public:
   explicit BinaryFile(MemoryBufferRef M) : InputFile(BinaryKind, M) {}
   static bool classof(const InputFile *F) { return F->kind() == BinaryKind; }
-  template <class ELFT> InputFile *createELF();
+  template <class ELFT> void parse();
+  ArrayRef<InputSectionData *> getSections() const { return Sections; }
 
 private:
-  std::vector<uint8_t> Buffer;
+  std::vector<InputSectionData *> Sections;
 };
 
 InputFile *createObjectFile(MemoryBufferRef MB, StringRef ArchiveName = "",

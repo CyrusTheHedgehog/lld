@@ -27,7 +27,7 @@ extern class LinkerDriver *Driver;
 
 class LinkerDriver {
 public:
-  void main(ArrayRef<const char *> Args);
+  void main(ArrayRef<const char *> Args, bool CanExitEarly);
   void addFile(StringRef Path);
   void addLibrary(StringRef Name);
   llvm::LLVMContext Context;      // to parse bitcode files
@@ -42,7 +42,7 @@ protected:
   template <class ELFT> void link(llvm::opt::InputArgList &Args);
 
   // True if we are in --whole-archive and --no-whole-archive.
-  bool WholeArchive = false;
+  bool InWholeArchive = false;
 
   // True if we are in --start-lib and --end-lib.
   bool InLib = false;
@@ -50,7 +50,6 @@ protected:
   // True if we are in -format=binary and -format=elf.
   bool InBinary = false;
 
-  llvm::BumpPtrAllocator Alloc;
   std::vector<InputFile *> Files;
   std::vector<std::unique_ptr<MemoryBuffer>> OwningMBs;
 };
@@ -60,9 +59,6 @@ class ELFOptTable : public llvm::opt::OptTable {
 public:
   ELFOptTable();
   llvm::opt::InputArgList parse(ArrayRef<const char *> Argv);
-
-private:
-  llvm::BumpPtrAllocator Alloc;
 };
 
 // Create enum with OPT_xxx values for each option in Options.td

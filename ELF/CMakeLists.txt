@@ -7,7 +7,6 @@ add_lld_library(lldELF
   HanafudaDriver.cpp
   DriverUtils.cpp
   EhFrame.cpp
-  ELFCreator.cpp
   Error.cpp
   GdbIndex.cpp
   ICF.cpp
@@ -16,6 +15,7 @@ add_lld_library(lldELF
   LTO.cpp
   LinkerScript.cpp
   MarkLive.cpp
+  Memory.cpp
   Mips.cpp
   OutputSections.cpp
   Relocations.cpp
