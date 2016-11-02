@@ -46,9 +46,9 @@ LinkerScriptBase *elf::ScriptBase;
 ScriptConfiguration *elf::ScriptConfig;
 
 template <class ELFT> static void addRegular(SymbolAssignment *Cmd) {
-  Symbol *Sym = Symtab<ELFT>::X->addRegular(Cmd->Name, STV_DEFAULT, nullptr,
+  uint8_t Visibility = Cmd->Hidden ? STV_HIDDEN : STV_DEFAULT;
+  Symbol *Sym = Symtab<ELFT>::X->addRegular(Cmd->Name, Visibility, nullptr,
                                             STB_GLOBAL, STT_NOTYPE, 0);
-  Sym->Visibility = Cmd->Hidden ? STV_HIDDEN : STV_DEFAULT;
   Cmd->Sym = Sym->body();
 
   // If we have no SECTIONS then we don't have '.' and don't call
@@ -64,7 +64,7 @@ template <class ELFT> static void addSynthetic(SymbolAssignment *Cmd) {
 }
 
 template <class ELFT> static void addSymbol(SymbolAssignment *Cmd) {
-  if (Cmd->IsAbsolute)
+  if (Cmd->Expression.IsAbsolute())
     addRegular<ELFT>(Cmd);
   else
     addSynthetic<ELFT>(Cmd);
@@ -299,7 +299,7 @@ void LinkerScript<ELFT>::processCommands(OutputSectionFactory<ELFT> &Factory) {
     const std::unique_ptr<BaseCommand> &Base1 = *Iter;
     if (auto *Cmd = dyn_cast<SymbolAssignment>(Base1.get())) {
       if (shouldDefine<ELFT>(Cmd))
-        addRegular<ELFT>(Cmd);
+        addSymbol<ELFT>(Cmd);
       continue;
     }
     if (auto *Cmd = dyn_cast<AssertCommand>(Base1.get())) {
@@ -361,17 +361,17 @@ void LinkerScript<ELFT>::createSections(OutputSectionFactory<ELFT> &Factory) {
 template <class ELFT>
 static void assignSectionSymbol(SymbolAssignment *Cmd,
                                 OutputSectionBase<ELFT> *Sec,
-                                typename ELFT::uint Off) {
+                                typename ELFT::uint Value) {
   if (!Cmd->Sym)
     return;
 
   if (auto *Body = dyn_cast<DefinedSynthetic<ELFT>>(Cmd->Sym)) {
     Body->Section = Sec;
-    Body->Value = Cmd->Expression(Sec->getVA() + Off) - Sec->getVA();
+    Body->Value = Cmd->Expression(Value) - Sec->getVA();
     return;
   }
   auto *Body = cast<DefinedRegular<ELFT>>(Cmd->Sym);
-  Body->Value = Cmd->Expression(Sec->getVA() + Off);
+  Body->Value = Cmd->Expression(Value);
 }
 
 template <class ELFT> static bool isTbss(OutputSectionBase<ELFT> *Sec) {
@@ -439,7 +439,7 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
       CurOutSec->setSize(alignTo(Dot - CurOutSec->getVA(), Config->CommonAlignment));
       return;
     }
-    assignSectionSymbol<ELFT>(AssignCmd, CurOutSec, Dot - CurOutSec->getVA());
+    assignSectionSymbol<ELFT>(AssignCmd, CurOutSec, Dot);
     return;
   }
 
@@ -543,8 +543,7 @@ template <class ELFT> void LinkerScript<ELFT>::adjustSectionsBeforeSorting() {
       continue;
     }
 
-    auto *OutSec = new OutputSection<ELFT>(Cmd->Name, Type, Flags);
-    Out<ELFT>::Pool.emplace_back(OutSec);
+    auto *OutSec = make<OutputSection<ELFT>>(Cmd->Name, Type, Flags);
     OutputSections->push_back(OutSec);
   }
 }
@@ -621,7 +620,8 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
       if (Cmd->Name == ".") {
         Dot = Cmd->Expression(Dot);
       } else if (Cmd->Sym) {
-        cast<DefinedRegular<ELFT>>(Cmd->Sym)->Value = Cmd->Expression(Dot);
+        assignSectionSymbol(Cmd, CurOutSec ? CurOutSec : (*OutputSections)[0],
+                            Dot);
       }
       continue;
     }
@@ -867,6 +867,12 @@ template <class ELFT> bool LinkerScript<ELFT>::isDefined(StringRef S) {
   return Symtab<ELFT>::X->find(S) != nullptr;
 }
 
+template <class ELFT> bool LinkerScript<ELFT>::isAbsolute(StringRef S) {
+  SymbolBody *Sym = Symtab<ELFT>::X->find(S);
+  auto *DR = dyn_cast_or_null<DefinedRegular<ELFT>>(Sym);
+  return DR && !DR->Section;
+}
+
 // Returns indices of ELF headers containing specific section, identified
 // by Name. Each index is a zero based number of ELF header listed within
 // PHDRS {} script block.
@@ -936,7 +942,7 @@ private:
   unsigned readPhdrType();
   SortSectionPolicy readSortKind();
   SymbolAssignment *readProvideHidden(bool Provide, bool Hidden);
-  SymbolAssignment *readProvideOrAssignment(StringRef Tok, bool MakeAbsolute);
+  SymbolAssignment *readProvideOrAssignment(StringRef Tok);
   void readSort();
   Expr readAssert();
 
@@ -1017,7 +1023,7 @@ void ScriptParser::readLinkerScript() {
       readSections();
     } else if (Tok == "VERSION") {
       readVersion();
-    } else if (SymbolAssignment *Cmd = readProvideOrAssignment(Tok, true)) {
+    } else if (SymbolAssignment *Cmd = readProvideOrAssignment(Tok)) {
       Opt.Commands.emplace_back(Cmd);
     } else {
       setError("unknown directive: " + Tok);
@@ -1180,7 +1186,7 @@ void ScriptParser::readSections() {
   expect("{");
   while (!Error && !consume("}")) {
     StringRef Tok = next();
-    BaseCommand *Cmd = readProvideOrAssignment(Tok, true);
+    BaseCommand *Cmd = readProvideOrAssignment(Tok);
     if (!Cmd) {
       if (Tok == "ASSERT")
         Cmd = new AssertCommand(readAssert());
@@ -1361,7 +1367,7 @@ ScriptParser::readOutputSectionDescription(StringRef OutSec) {
 
   while (!Error && !consume("}")) {
     StringRef Tok = next();
-    if (SymbolAssignment *Assignment = readProvideOrAssignment(Tok, false))
+    if (SymbolAssignment *Assignment = readProvideOrAssignment(Tok))
       Cmd->Commands.emplace_back(Assignment);
     else if (BytesDataCommand *Data = readBytesDataCommand(Tok))
       Cmd->Commands.emplace_back(Data);
@@ -1410,8 +1416,7 @@ SymbolAssignment *ScriptParser::readProvideHidden(bool Provide, bool Hidden) {
   return Cmd;
 }
 
-SymbolAssignment *ScriptParser::readProvideOrAssignment(StringRef Tok,
-                                                        bool MakeAbsolute) {
+SymbolAssignment *ScriptParser::readProvideOrAssignment(StringRef Tok) {
   SymbolAssignment *Cmd = nullptr;
   if (peek() == "=" || peek() == "+=") {
     Cmd = readAssignment(Tok);
@@ -1423,8 +1428,6 @@ SymbolAssignment *ScriptParser::readProvideOrAssignment(StringRef Tok,
   } else if (Tok == "PROVIDE_HIDDEN") {
     Cmd = readProvideHidden(true, true);
   }
-  if (Cmd && MakeAbsolute)
-    Cmd->IsAbsolute = true;
   return Cmd;
 }
 
@@ -1434,22 +1437,27 @@ static uint64_t getSymbolValue(StringRef S, uint64_t Dot) {
   return ScriptBase->getSymbolValue(S);
 }
 
+static bool isAbsolute(StringRef S) {
+  if (S == ".")
+    return false;
+  return ScriptBase->isAbsolute(S);
+}
+
 SymbolAssignment *ScriptParser::readAssignment(StringRef Name) {
   StringRef Op = next();
-  bool IsAbsolute = false;
   Expr E;
   assert(Op == "=" || Op == "+=");
   if (consume("ABSOLUTE")) {
     // The RHS may be something like "ABSOLUTE(.) & 0xff".
     // Call readExpr1 to read the whole expression.
     E = readExpr1(readParenExpr(), 0);
-    IsAbsolute = true;
+    E.IsAbsolute = []() { return true; };
   } else {
     E = readExpr();
   }
   if (Op == "+=")
     E = [=](uint64_t Dot) { return getSymbolValue(Name, Dot) + E(Dot); };
-  return new SymbolAssignment(Name, E, IsAbsolute);
+  return new SymbolAssignment(Name, E);
 }
 
 // This is an operator-precedence parser to parse a linker
@@ -1470,7 +1478,8 @@ static Expr combine(StringRef Op, Expr L, Expr R) {
     };
   }
   if (Op == "+")
-    return [=](uint64_t Dot) { return L(Dot) + R(Dot); };
+    return {[=](uint64_t Dot) { return L(Dot) + R(Dot); },
+            [=]() { return L.IsAbsolute() && R.IsAbsolute(); }};
   if (Op == "-")
     return [=](uint64_t Dot) { return L(Dot) - R(Dot); };
   if (Op == "<<")
@@ -1685,7 +1694,8 @@ Expr ScriptParser::readPrimary() {
   // Tok is a symbol name.
   if (Tok != "." && !isValidCIdentifier(Tok))
     setError("malformed number: " + Tok);
-  return [=](uint64_t Dot) { return getSymbolValue(Tok, Dot); };
+  return {[=](uint64_t Dot) { return getSymbolValue(Tok, Dot); },
+          [=]() { return isAbsolute(Tok); }};
 }
 
 Expr ScriptParser::readTernary(Expr Cond) {

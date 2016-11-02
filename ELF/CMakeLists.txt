@@ -24,6 +24,7 @@ add_lld_library(lldELF
   SymbolListFile.cpp
   SymbolTable.cpp
   Symbols.cpp
+  SyntheticSections.cpp
   Target.cpp
   Thunks.cpp
   Writer.cpp
