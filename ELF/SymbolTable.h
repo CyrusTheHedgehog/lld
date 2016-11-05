@@ -15,11 +15,8 @@
 #include "Strings.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseMap.h"
-<<<<<<< HEAD
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Regex.h"
-=======
->>>>>>> master
 
 namespace lld {
 namespace elf {
