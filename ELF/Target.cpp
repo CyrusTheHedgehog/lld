@@ -136,6 +136,7 @@ public:
   PPCTargetInfo();
   void relocateOne(uint8_t *Loc, uint32_t Type, uint64_t Val) const override;
   RelExpr getRelExpr(uint32_t Type, const SymbolBody &S) const override;
+  RelExpr adjustSdaRelExpr(const uint8_t *Data) const override;
 };
 
 class PPC64TargetInfo final : public TargetInfo {
@@ -294,6 +295,11 @@ void TargetInfo::relaxTlsIeToLe(uint8_t *Loc, uint32_t Type,
 void TargetInfo::relaxTlsLdToLe(uint8_t *Loc, uint32_t Type,
                                 uint64_t Val) const {
   llvm_unreachable("Should not have claimed to be relaxable");
+}
+
+RelExpr TargetInfo::adjustSdaRelExpr(const uint8_t *Data) const {
+  llvm_unreachable("SDAREL relocation unsupported");
+  return R_ABS;
 }
 
 X86TargetInfo::X86TargetInfo() {
@@ -964,6 +970,7 @@ void PPCTargetInfo::relocateOne(uint8_t *Loc, uint32_t Type,
     write16be(Loc, applyPPCHa(Val));
     break;
   case R_PPC_ADDR16_LO:
+  case R_PPC_EMB_SDA21:
     write16be(Loc, applyPPCLo(Val));
     break;
   case R_PPC_ADDR32:
@@ -983,9 +990,19 @@ RelExpr PPCTargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
   case R_PPC_REL24:
   case R_PPC_REL32:
     return R_PC;
+  case R_PPC_EMB_SDA21:
+    return R_SDAREL;
   default:
     return R_ABS;
   }
+}
+
+RelExpr PPCTargetInfo::adjustSdaRelExpr(const uint8_t *Data) const {
+  // If bits 11-15 of the target instruction indicate r2 base usage,
+  // adjust to SDA2 relocation
+  if ((*(Data - 1) & 0x1f) == 2)
+    return R_SDA2REL;
+  return R_SDAREL;
 }
 
 PPC64TargetInfo::PPC64TargetInfo() {

@@ -380,6 +380,10 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
   case R_PLT_PAGE_PC:
   case R_PAGE_PC:
     return getAArch64Page(Body.getVA<ELFT>(A)) - getAArch64Page(P);
+  case R_SDAREL:
+    return Body.getVA<ELFT>(A) - Config->SDataBase;
+  case R_SDA2REL:
+    return Body.getVA<ELFT>(A) - Config->SData2Base;
   }
   llvm_unreachable("Invalid expression");
 }

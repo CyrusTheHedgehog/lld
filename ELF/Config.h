@@ -152,6 +152,9 @@ struct Configuration {
   uint64_t InitialAddrOffset = 0;
   uint64_t CommonAlignment = 1;
   std::function<void(uint8_t*, void*)> OPreWrite;
+  uint64_t SDataBase = 0;
+  uint64_t SData2Base = 0;
+  bool NoImplicitSort = false;
 };
 
 // The only instance of Configuration struct.

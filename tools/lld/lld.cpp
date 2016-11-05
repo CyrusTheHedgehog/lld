@@ -109,7 +109,7 @@ int main(int Argc, const char **Argv) {
   case Darwin:
     return !mach_o::link(Args);
   case Hanafuda:
-    return !hanafuda::link(Args);
+    return !hanafuda::link(Args, true);
   default:
     die("lld is a generic driver.\n"
         "Invoke ld.lld (Unix), ld (Mac) or lld-link (Windows) instead.");

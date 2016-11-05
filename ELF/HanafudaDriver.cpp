@@ -14,6 +14,7 @@
 #include "InputFiles.h"
 #include "InputSection.h"
 #include "LinkerScript.h"
+#include "Memory.h"
 #include "OutputSections.h"
 #include "Strings.h"
 #include "SymbolListFile.h"
@@ -123,6 +124,9 @@ private:
   uint32_t BssAddr = 0;
   uint32_t BssSize = 0;
   uint32_t EntryPoint = 0;
+  uint32_t StackBase = 0;
+  uint32_t SdataBase = 0;
+  uint32_t Sdata2Base = 0;
   bool DolphinSections = false;
 
   std::unordered_multimap<uint32_t, uint32_t> OrigCallAddrToInstFileOffs;
@@ -296,6 +300,10 @@ public:
     return _getDataSectionData(7);
   }
 
+  uint32_t getStackBase() const { return StackBase; }
+  uint32_t getSdataBase() const { return SdataBase; }
+  uint32_t getSdata2Base() const { return Sdata2Base; }
+
   bool validateSymbolAddr(uint32_t addr, HanafudaSecType& secOut, int& secIdxOut) const {
     for (int i = 0; i < 7; ++i) {
       const Section& sec = getTextSection(i);
@@ -413,11 +421,55 @@ class LinkerDriver : public elf::LinkerDriver {
 
   void link(llvm::opt::InputArgList &Args);
 public:
-  void main(ArrayRef<const char *> Args);
+  void main(ArrayRef<const char *> Args, bool CanExitEarly);
 };
 
+static uint32_t getPPCRegisterOp(const MCInst &Inst) {
+  for (const MCOperand &op : Inst)
+    if (op.isReg())
+      return op.getReg();
+  return 0xffffffff;
+}
+
+static uint32_t getPPCImmediateOp(const MCInst &Inst) {
+  for (const MCOperand &op : Inst)
+    if (op.isImm())
+      return op.getImm();
+  return 0xffffffff;
+}
+
 void DOLFile::scanForRelocations(LinkerDriver &Drv) {
-  unsigned ppcLR = Drv.MRI->getRARegister();
+  MCRegisterInfo &MRI = *Drv.MRI;
+  MCInstrInfo &MCII = *Drv.MCII;
+
+  unsigned ppcLR = MRI.getRARegister();
+  unsigned ppcR1;
+  unsigned ppcR2;
+  unsigned ppcR13;
+
+  unsigned ppcBL;
+  unsigned ppcLIS;
+  unsigned ppcORI;
+
+  for (unsigned i = 0; i < MRI.getNumRegs(); ++i) {
+    StringRef name(MRI.getName(i));
+    if (name == "R1")
+      ppcR1 = i;
+    else if (name == "R2")
+      ppcR2 = i;
+    else if (name == "R13")
+      ppcR13 = i;
+  }
+
+  for (unsigned i = 0; i < MCII.getNumOpcodes(); ++i) {
+    StringRef name = MCII.getName(i);
+    if (name == "BL")
+      ppcBL = i;
+    else if (name == "LIS")
+      ppcLIS = i;
+    else if (name == "ORI")
+      ppcORI = i;
+  }
 
   uint64_t Size;
   ArrayRef<uint8_t> Data(reinterpret_cast<const unsigned char*>(
@@ -446,13 +498,32 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
 
       case MCDisassembler::Success: {
         const MCInstrDesc &Desc = Drv.MCII->get(Inst.getOpcode());
-        if (Desc.isCall() && Desc.hasImplicitDefOfPhysReg(ppcLR)) {
-          for (const MCOperand &op : Inst) {
-            if (op.isImm()) {
-              OrigCallAddrToInstFileOffs.insert(std::make_pair(op.getImm(), FileIndex));
-              break;
-            }
+
+        if (s == 0) {
+          // Scan .init instructions for stack and small data bases
+          uint32_t InstReg = getPPCRegisterOp(Inst);
+          if (InstReg == ppcR1) {
+            if (Desc.getOpcode() == ppcLIS)
+              StackBase = getPPCImmediateOp(Inst) << 16;
+            else if (Desc.getOpcode() == ppcORI)
+              StackBase |= getPPCImmediateOp(Inst);
+          } else if (InstReg == ppcR2) {
+            if (Desc.getOpcode() == ppcLIS)
+              Sdata2Base = getPPCImmediateOp(Inst) << 16;
+            else if (Desc.getOpcode() == ppcORI)
+              Sdata2Base |= getPPCImmediateOp(Inst);
+          } else if (InstReg == ppcR13) {
+            if (Desc.getOpcode() == ppcLIS)
+              SdataBase = getPPCImmediateOp(Inst) << 16;
+            else if (Desc.getOpcode() == ppcORI)
+              SdataBase |= getPPCImmediateOp(Inst);
           }
+        }
+
+        if (Desc.isCall() && Desc.hasImplicitDefOfPhysReg(ppcLR)) {
+          uint32_t Imm = getPPCImmediateOp(Inst);
+          if (Imm != 0xffffffff)
+            OrigCallAddrToInstFileOffs.insert(std::make_pair(Imm, FileIndex));
         }
         break;
       }
@@ -469,19 +540,21 @@ void DOLFile::replaceTargetAddressRelocations(LinkerDriver &Drv,
   }
 }
 
-bool link(ArrayRef<const char *> Args, raw_ostream &Error) {
+bool link(ArrayRef<const char *> Args, bool CanExitEarly,
+          raw_ostream &Error) {
   HasError = false;
   ErrorOS = &Error;
+  Argv0 = Args[0];
 
   Configuration C;
-  LinkerDriver D;
+  hanafuda::LinkerDriver D;
   ScriptConfiguration SC;
   Config = &C;
   Driver = &D;
   ScriptConfig = &SC;
 
-  static_cast<LinkerDriver*>(Driver)->main(Args);
-  InputFile::freePool();
+  D.main(Args, CanExitEarly);
+  freeArena();
   return !HasError;
 }
 
@@ -557,7 +630,7 @@ getZOptionValue(opt::InputArgList &Args, StringRef Key, uint64_t Default) {
   return Default;
 }
 
-void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
+void LinkerDriver::main(ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
   ELFOptTable Parser;
   opt::InputArgList Args = Parser.parse(ArgsArr.slice(1));
   if (Args.hasArg(OPT_help)) {
@@ -566,6 +639,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   }
   if (Args.hasArg(OPT_version))
     outs() << getLLDVersion() << "\n";
+  Config->ExitEarly = CanExitEarly && !Args.hasArg(OPT_full_shutdown);
 
   // Ensure base .dol is provided
   if (!Args.hasArg(OPT_hanafuda_base_dol)) {
@@ -620,6 +694,8 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr) {
   checkOptions(Args);
   Config->EKind = ELF32BEKind;
   Config->EMachine = EM_PPC;
+  Config->SDataBase = DolFile->getSdataBase();
+  Config->SData2Base = DolFile->getSdata2Base();
   if (HasError)
     return;
 
@@ -675,32 +751,62 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   Config->InitialFileOffset = DolFile->getUnallocatedFileOffset();
   Config->InitialAddrOffset = DolFile->getUnallocatedAddressOffset();
   Config->CommonAlignment = 32;
+  Config->Strip = StripPolicy::All;
+  Config->NoImplicitSort = true;
   Config->OPreWrite = [&](uint8_t *BufData, void *OutSecs) {
     // I'm called after lld has assigned file offsets and VAs to new output sections,
     // and before the file buffer has been committed to disk
     std::vector<OutputSectionBase<ELF32BE>*> &OutputSections =
         *reinterpret_cast<std::vector<OutputSectionBase<ELF32BE>*>*>(OutSecs);
 
-    // Add new text and data section to .dol
-    int TextSecIdx = DolFile->getUnusedTextSectionIndex();
-    int DataSecIdx = DolFile->getUnusedDataSectionIndex();
-    DOLFile::Section &TextSec = DolFile->getTextSection(TextSecIdx);
-    DOLFile::Section &DataSec = DolFile->getDataSection(DataSecIdx);
+    DOLFile::Section *DataSec = nullptr;
 
     // Fill in header information
     for (OutputSectionBase<ELF32BE> *Sec : OutputSections) {
       if (!Sec->getFileOff())
         continue;
-      if (Sec->getName() == ".htext") {
+      if (Sec->getName() == ".sdata") {
+        int SDataSecIdx = DolFile->getUnusedDataSectionIndex();
+        if (SDataSecIdx == -1) {
+          error("Ran out of DOL data sections for .sdata");
+          return;
+        }
+        DOLFile::Section &SDataSec = DolFile->getDataSection(SDataSecIdx);
+        SDataSec.Offset = Sec->getFileOff();
+        SDataSec.Addr = Sec->getVA();
+        SDataSec.Length = Sec->getSize();
+      } else if (Sec->getName() == ".sdata2") {
+        int SData2SecIdx = DolFile->getUnusedDataSectionIndex();
+        if (SData2SecIdx == -1) {
+          error("Ran out of DOL data sections for .sdata2");
+          return;
+        }
+        DOLFile::Section &SData2Sec = DolFile->getDataSection(SData2SecIdx);
+        SData2Sec.Offset = Sec->getFileOff();
+        SData2Sec.Addr = Sec->getVA();
+        SData2Sec.Length = Sec->getSize();
+      } else if (Sec->getName() == ".htext") {
+        int TextSecIdx = DolFile->getUnusedTextSectionIndex();
+        if (TextSecIdx == -1) {
+          error("Ran out of DOL text sections for .htext");
+          return;
+        }
+        DOLFile::Section &TextSec = DolFile->getTextSection(TextSecIdx);
         TextSec.Offset = Sec->getFileOff();
         TextSec.Addr = Sec->getVA();
         TextSec.Length = Sec->getSize();
       } else {
-        if (!DataSec.Offset) {
-          DataSec.Offset = Sec->getFileOff();
-          DataSec.Addr = Sec->getVA();
+        if (!DataSec) {
+          int DataSecIdx = DolFile->getUnusedDataSectionIndex();
+          if (DataSecIdx == -1) {
+            error("Ran out of DOL data sections for " + Sec->getName());
+            return;
+          }
+          DataSec = &DolFile->getDataSection(DataSecIdx);
+          DataSec->Offset = Sec->getFileOff();
+          DataSec->Addr = Sec->getVA();
         }
-        DataSec.Length = Sec->getFileOff() - DataSec.Offset + Sec->getSize();
+        DataSec->Length = (Sec->getVA() - DataSec->Addr) + Sec->getSize();
       }
     }
 
@@ -712,6 +818,20 @@ void LinkerDriver::link(opt::InputArgList &Args) {
 
   // Programmatically configure hanafuda linker script
   {
+    std::unique_ptr<OutputSectionCommand> SdataOut = make_unique<OutputSectionCommand>(".sdata");
+    std::unique_ptr<InputSectionDescription> SdataIn = make_unique<InputSectionDescription>("*");
+    SdataIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".sdata", ".sbss"}));
+    SdataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
+    SdataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
+    SdataOut->Commands.push_back(std::move(SdataIn));
+
+    std::unique_ptr<OutputSectionCommand> Sdata2Out = make_unique<OutputSectionCommand>(".sdata2");
+    std::unique_ptr<InputSectionDescription> Sdata2In = make_unique<InputSectionDescription>("*");
+    Sdata2In->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".sdata2", ".sbss2"}));
+    Sdata2In->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
+    Sdata2In->SectionPatterns.back().SortInner = SortSectionPolicy::None;
+    Sdata2Out->Commands.push_back(std::move(Sdata2In));
+
     std::unique_ptr<OutputSectionCommand> TextOut = make_unique<OutputSectionCommand>(".htext");
     std::unique_ptr<InputSectionDescription> TextIn = make_unique<InputSectionDescription>("*");
     TextIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".text", ".text.*"}));
@@ -721,15 +841,21 @@ void LinkerDriver::link(opt::InputArgList &Args) {
 
     std::unique_ptr<OutputSectionCommand> DataOut = make_unique<OutputSectionCommand>(".hdata");
     std::unique_ptr<InputSectionDescription> DataIn = make_unique<InputSectionDescription>("*");
-    DataIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".data", ".data.*", ".bss"}));
+    DataIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".data", ".data.*",
+                                                                       ".rodata", ".rodata.*",
+                                                                       ".bss"}));
     DataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     DataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     TextOut->Commands.push_back(std::move(DataIn));
 
     auto Align32Expr = [=](uint64_t Dot) { return (Dot + 31) & ~31; };
+    Sdata2Out->AddrExpr = Align32Expr;
+    Sdata2Out->AddrExpr = Align32Expr;
     TextOut->AddrExpr = Align32Expr;
     DataOut->AddrExpr = Align32Expr;
 
+    ScriptConfig->Commands.push_back(std::move(SdataOut));
+    ScriptConfig->Commands.push_back(std::move(Sdata2Out));
     ScriptConfig->Commands.push_back(std::move(TextOut));
     ScriptConfig->Commands.push_back(std::move(DataOut));
   }
@@ -831,7 +957,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   }
 
   // Write the result to the file.
-  writeDolResult<ELF32BE>();
+  writeResult<ELF32BE>();
 }
 
 }
