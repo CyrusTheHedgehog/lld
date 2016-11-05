@@ -18,6 +18,7 @@
 #include "Config.h"
 #include "Error.h"
 #include "InputFiles.h"
+#include "Memory.h"
 #include "OutputSections.h"
 #include "Strings.h"
 
@@ -36,10 +37,25 @@ using namespace llvm::support::endian;
 using namespace lld;
 using namespace lld::elf;
 
+static ArrayRef<uint8_t> createInterp() {
+  // StringSaver guarantees that the returned string ends with '\0'.
+  StringRef S = Saver.save(Config->DynamicLinker);
+  return {(const uint8_t *)S.data(), S.size() + 1};
+}
+
+template <class ELFT>
+InterpSection<ELFT>::InterpSection()
+    : InputSection<ELFT>(SHF_ALLOC, SHT_PROGBITS, 1, createInterp(),
+                         ".interp") {
+  this->Live = true;
+}
+
 template <class ELFT>
 BuildIdSection<ELFT>::BuildIdSection(size_t HashSize)
     : InputSection<ELFT>(SHF_ALLOC, SHT_NOTE, 1, ArrayRef<uint8_t>(),
                          ".note.gnu.build-id") {
+  this->Live = true;
+
   Buf.resize(16 + HashSize);
   const endianness E = ELFT::TargetEndianness;
   write32<E>(Buf.data(), 4);                   // Name size
@@ -94,6 +110,11 @@ void BuildIdHexstring<ELFT>::writeBuildId(MutableArrayRef<uint8_t> Buf) {
   memcpy(this->getOutputLoc(Buf.begin()) + 16, Config->BuildIdVector.data(),
          Config->BuildIdVector.size());
 }
+
+template class elf::InterpSection<ELF32LE>;
+template class elf::InterpSection<ELF32BE>;
+template class elf::InterpSection<ELF64LE>;
+template class elf::InterpSection<ELF64BE>;
 
 template class elf::BuildIdSection<ELF32LE>;
 template class elf::BuildIdSection<ELF32BE>;

@@ -43,23 +43,6 @@ class InputFile;
 class Lazy;
 class SymbolBody;
 
-// Debugging information helper class. The main purpose is to
-// retrieve source file and line for error reporting. Linker may
-// find reasonable number of errors in a single object file, so
-// we cache debugging information in order to parse it only once
-// for each object file we link.
-template <class ELFT> class DIHelper {
-  typedef typename ELFT::uint uintX_t;
-
-public:
-  DIHelper(InputFile *F);
-  ~DIHelper();
-  std::string getLineInfo(InputSectionBase<ELFT> *S, uintX_t Offset);
-
-private:
-  std::unique_ptr<llvm::DWARFDebugLine> DwarfLine;
-};
-
 // The root class of input files.
 class InputFile {
 public:
@@ -117,21 +100,22 @@ public:
     return K == ObjectKind || K == SharedKind;
   }
 
-  const llvm::object::ELFFile<ELFT> &getObj() const { return ELFObj; }
-  llvm::object::ELFFile<ELFT> &getObj() { return ELFObj; }
+  llvm::object::ELFFile<ELFT> getObj() const {
+    return llvm::object::ELFFile<ELFT>(MB.getBuffer());
+  }
 
   StringRef getStringTable() const { return StringTable; }
 
   uint32_t getSectionIndex(const Elf_Sym &Sym) const;
 
-  Elf_Sym_Range getElfSymbols(bool OnlyGlobals);
+  Elf_Sym_Range getGlobalSymbols();
 
 protected:
-  llvm::object::ELFFile<ELFT> ELFObj;
-  const Elf_Shdr *Symtab = nullptr;
+  ArrayRef<Elf_Sym> Symbols;
+  uint32_t FirstNonLocal = 0;
   ArrayRef<Elf_Word> SymtabSHNDX;
   StringRef StringTable;
-  void initStringTable();
+  void initSymtab(ArrayRef<Elf_Shdr> Sections, const Elf_Shdr *Symtab);
 };
 
 // .o file.
@@ -143,7 +127,8 @@ template <class ELFT> class ObjectFile : public ELFFileBase<ELFT> {
   typedef typename ELFT::Word Elf_Word;
   typedef typename ELFT::uint uintX_t;
 
-  StringRef getShtGroupSignature(const Elf_Shdr &Sec);
+  StringRef getShtGroupSignature(ArrayRef<Elf_Shdr> Sections,
+                                 const Elf_Shdr &Sec);
   ArrayRef<Elf_Word> getShtGroupEntries(const Elf_Shdr &Sec);
 
 public:
@@ -173,11 +158,9 @@ public:
     return getSymbolBody(SymIndex);
   }
 
-  const Elf_Shdr *getSymbolTable() const { return this->Symtab; };
-
-  // DI helper allows manipilating debugging information for this
-  // object file. Used for error reporting.
-  DIHelper<ELFT> *getDIHelper();
+  // Returns source line information for a given offset.
+  // If no information is available, returns "".
+  std::string getLineInfo(InputSectionBase<ELFT> *S, uintX_t Offset);
 
   // Get MIPS GP0 value defined by this file. This value represents the gp value
   // used to create the relocatable object and required to support
@@ -195,9 +178,10 @@ public:
 
 private:
   void
-  initializeSections(llvm::DenseSet<llvm::CachedHashStringRef> &ComdatGroups);
-  void initializeSymbols();
-  void initializeReverseDependencies();
+  initializeSections(llvm::DenseSet<llvm::CachedHashStringRef> &ComdatGroups,
+                     ArrayRef<Elf_Shdr> ObjSections);
+  void initializeSymbols(ArrayRef<Elf_Shdr> Sections);
+  void initializeDwarfLine();
   InputSectionBase<ELFT> *getRelocTarget(const Elf_Shdr &Sec);
   InputSectionBase<ELFT> *createInputSection(const Elf_Shdr &Sec,
                                              StringRef SectionStringTable);
@@ -218,7 +202,11 @@ private:
   // MIPS .MIPS.abiflags section defined by this file.
   std::unique_ptr<MipsAbiFlagsInputSection<ELFT>> MipsAbiFlags;
 
-  std::unique_ptr<DIHelper<ELFT>> DIH;
+  // Debugging information to retrieve source file and line for error
+  // reporting. Linker may find reasonable number of errors in a
+  // single object file, so we cache debugging information in order to
+  // parse it only once for each object file we link.
+  std::unique_ptr<llvm::DWARFDebugLine> DwarfLine;
 };
 
 // LazyObjectFile is analogous to ArchiveFile in the sense that

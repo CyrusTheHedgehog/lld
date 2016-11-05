@@ -12,10 +12,14 @@
 
 #include "InputFiles.h"
 #include "LTO.h"
+#include "Strings.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseMap.h"
+<<<<<<< HEAD
 #include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Regex.h"
+=======
+>>>>>>> master
 
 namespace lld {
 namespace elf {
@@ -97,7 +101,7 @@ public:
   const llvm::StringMap<std::string>& getHanafudaPatches() const { return HanafudaPatches; }
 
 private:
-  std::vector<SymbolBody *> findAll(const llvm::Regex &Re);
+  std::vector<SymbolBody *> findAll(const StringMatcher &M);
   std::pair<Symbol *, bool> insert(StringRef &Name);
   std::pair<Symbol *, bool> insert(StringRef &Name, uint8_t Type,
                                    uint8_t Visibility, bool CanOmitFromDynSym,

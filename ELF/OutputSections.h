@@ -56,7 +56,6 @@ public:
     Got,
     GotPlt,
     HashTable,
-    Interp,
     Merge,
     MipsReginfo,
     MipsOptions,
@@ -80,7 +79,7 @@ public:
   uintX_t getFileOffset() { return Header.sh_offset; }
   void setSHName(unsigned Val) { Header.sh_name = Val; }
   void writeHeaderTo(Elf_Shdr *SHdr);
-  StringRef getName() { return Name; }
+  StringRef getName() const { return Name; }
 
   virtual void addSection(InputSectionBase<ELFT> *C) {}
   virtual Kind getKind() const { return Base; }
@@ -517,17 +516,6 @@ private:
 };
 
 template <class ELFT>
-class InterpSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
-
-public:
-  InterpSection();
-  void writeTo(uint8_t *Buf) override;
-  typename Base::Kind getKind() const override { return Base::Interp; }
-  static bool classof(const Base *B) { return B->getKind() == Base::Interp; }
-};
-
-template <class ELFT>
 class StringTableSection final : public OutputSectionBase<ELFT> {
   typedef OutputSectionBase<ELFT> Base;
 
@@ -640,11 +628,15 @@ class DynamicSection final : public OutputSectionBase<ELFT> {
   std::vector<Entry> Entries;
 
 public:
-  explicit DynamicSection();
+  DynamicSection();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
   typename Base::Kind getKind() const override { return Base::Dynamic; }
   static bool classof(const Base *B) { return B->getKind() == Base::Dynamic; }
+
+private:
+  void addEntries();
+  void Add(Entry E) { Entries.push_back(E); }
 };
 
 template <class ELFT>
@@ -751,7 +743,6 @@ template <class ELFT> struct Out {
   static GotPltSection<ELFT> *GotPlt;
   static GotSection<ELFT> *Got;
   static HashTableSection<ELFT> *HashTab;
-  static InterpSection<ELFT> *Interp;
   static OutputSection<ELFT> *Bss;
   static OutputSection<ELFT> *MipsRldMap;
   static OutputSectionBase<ELFT> *Opd;
@@ -818,7 +809,6 @@ template <class ELFT> GnuHashTableSection<ELFT> *Out<ELFT>::GnuHashTab;
 template <class ELFT> GotPltSection<ELFT> *Out<ELFT>::GotPlt;
 template <class ELFT> GotSection<ELFT> *Out<ELFT>::Got;
 template <class ELFT> HashTableSection<ELFT> *Out<ELFT>::HashTab;
-template <class ELFT> InterpSection<ELFT> *Out<ELFT>::Interp;
 template <class ELFT> OutputSection<ELFT> *Out<ELFT>::Bss;
 template <class ELFT> OutputSection<ELFT> *Out<ELFT>::MipsRldMap;
 template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::Opd;
