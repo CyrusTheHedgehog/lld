@@ -820,30 +820,30 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   {
     std::unique_ptr<OutputSectionCommand> SdataOut = make_unique<OutputSectionCommand>(".sdata");
     std::unique_ptr<InputSectionDescription> SdataIn = make_unique<InputSectionDescription>("*");
-    SdataIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".sdata", ".sbss"}));
+    SdataIn->SectionPatterns.emplace_back(StringMatcher{}, StringMatcher({".sdata", ".sbss"}));
     SdataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     SdataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     SdataOut->Commands.push_back(std::move(SdataIn));
 
     std::unique_ptr<OutputSectionCommand> Sdata2Out = make_unique<OutputSectionCommand>(".sdata2");
     std::unique_ptr<InputSectionDescription> Sdata2In = make_unique<InputSectionDescription>("*");
-    Sdata2In->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".sdata2", ".sbss2"}));
+    Sdata2In->SectionPatterns.emplace_back(StringMatcher{}, StringMatcher({".sdata2", ".sbss2"}));
     Sdata2In->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     Sdata2In->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     Sdata2Out->Commands.push_back(std::move(Sdata2In));
 
     std::unique_ptr<OutputSectionCommand> TextOut = make_unique<OutputSectionCommand>(".htext");
     std::unique_ptr<InputSectionDescription> TextIn = make_unique<InputSectionDescription>("*");
-    TextIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".text", ".text.*"}));
+    TextIn->SectionPatterns.emplace_back(StringMatcher{}, StringMatcher({".text", ".text.*"}));
     TextIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     TextIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     TextOut->Commands.push_back(std::move(TextIn));
 
     std::unique_ptr<OutputSectionCommand> DataOut = make_unique<OutputSectionCommand>(".hdata");
     std::unique_ptr<InputSectionDescription> DataIn = make_unique<InputSectionDescription>("*");
-    DataIn->SectionPatterns.emplace_back(Regex{}, compileGlobPatterns({".data", ".data.*",
-                                                                       ".rodata", ".rodata.*",
-                                                                       ".bss"}));
+    DataIn->SectionPatterns.emplace_back(StringMatcher{}, StringMatcher({".data", ".data.*",
+                                                                         ".rodata", ".rodata.*",
+                                                                         ".bss"}));
     DataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     DataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     TextOut->Commands.push_back(std::move(DataIn));
