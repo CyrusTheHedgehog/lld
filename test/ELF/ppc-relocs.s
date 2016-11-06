@@ -3,10 +3,10 @@
 # RUN: llvm-objdump -disassemble-all %t2 | FileCheck %s
 # REQUIRES: ppc
 
-.sdata
+.sdata2
+smallstr2:
+  .long 0xDEADD00D
   .long 0xABCDEFAB
-smallstr:
-  .long 0xDEADBEEF
 
 # CHECK: Disassembly of section .sdata2:
 # CHECK: smallstr2:
@@ -81,11 +81,11 @@ mystr:
 # CHECK: .R_PPC_EMB_SDA21:
 # CHECK:    11020:	80 8d 00 00 	lwz 4, 0(13)
 # CHECK:    11024:	80 a2 ff fc 	lwz 5, -4(2)
-
-.sdata2
-smallstr2:
-  .long 0xDEADD00D
+  
+.sdata
   .long 0xABCDEFAB
+smallstr:
+  .long 0xDEADBEEF
 
 # CHECK: Disassembly of section .sdata:
 # CHECK: .sdata:
