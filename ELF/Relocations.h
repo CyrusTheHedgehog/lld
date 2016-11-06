@@ -71,7 +71,6 @@ enum RelExpr {
   R_TLSLD,
   R_TLSLD_PC,
   R_SDAREL,
-  R_SDA2REL,
 };
 
 // Architecture-neutral representation of relocation.

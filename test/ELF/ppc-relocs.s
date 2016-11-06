@@ -1,7 +1,17 @@
 # RUN: llvm-mc -filetype=obj -triple=powerpc-unknown-freebsd %s -o %t
 # RUN: ld.lld %t -o %t2
-# RUN: llvm-objdump -d %t2 | FileCheck %s
+# RUN: llvm-objdump -disassemble-all %t2 | FileCheck %s
 # REQUIRES: ppc
+
+.sdata
+  .long 0xABCDEFAB
+smallstr:
+  .long 0xDEADBEEF
+
+# CHECK: Disassembly of section .sdata2:
+# CHECK: smallstr2:
+# CHECK:    100d4:	de ad d0 0d 	stfdu 21, -12275(13)
+# CHECK:    100d8:	ab cd ef ab 	lha 30, -4181(13)
 
 .section .R_PPC_ADDR16_HA,"ax",@progbits
 .globl _start
@@ -62,3 +72,23 @@ mystr:
 # CHECK: Disassembly of section .R_PPC_ADDR32:
 # CHECK: .FR_PPC_ADDR32:
 # CHECK:    1101c:       00 01 10 20
+
+.section .R_PPC_EMB_SDA21,"ax",@progbits
+  lwz 4, smallstr@sdarx(0)
+  lwz 5, smallstr2@sdarx(0)
+
+# CHECK: Disassembly of section .R_PPC_EMB_SDA21:
+# CHECK: .R_PPC_EMB_SDA21:
+# CHECK:    11020:	80 8d 00 00 	lwz 4, 0(13)
+# CHECK:    11024:	80 a2 ff fc 	lwz 5, -4(2)
+
+.sdata2
+smallstr2:
+  .long 0xDEADD00D
+  .long 0xABCDEFAB
+
+# CHECK: Disassembly of section .sdata:
+# CHECK: .sdata:
+# CHECK:    12000:	ab cd ef ab 	lha 30, -4181(13)
+# CHECK: smallstr:
+# CHECK:    12004:	de ad be ef 	stfdu 21, -16657(13)

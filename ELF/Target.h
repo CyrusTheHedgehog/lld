@@ -102,8 +102,6 @@ public:
   virtual void relaxTlsGdToLe(uint8_t *Loc, uint32_t Type, uint64_t Val) const;
   virtual void relaxTlsIeToLe(uint8_t *Loc, uint32_t Type, uint64_t Val) const;
   virtual void relaxTlsLdToLe(uint8_t *Loc, uint32_t Type, uint64_t Val) const;
-
-  virtual RelExpr adjustSdaRelExpr(const uint8_t *Data) const;
 };
 
 StringRef getRelName(uint32_t Type);

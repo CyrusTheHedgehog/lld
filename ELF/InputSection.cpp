@@ -380,10 +380,32 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
   case R_PLT_PAGE_PC:
   case R_PAGE_PC:
     return getAArch64Page(Body.getVA<ELFT>(A)) - getAArch64Page(P);
-  case R_SDAREL:
-    return Body.getVA<ELFT>(A) - Config->SDataBase;
-  case R_SDA2REL:
-    return Body.getVA<ELFT>(A) - Config->SData2Base;
+  case R_SDAREL: {
+    auto CheckReturn = [](int64_t Val, uint32_t Reg) -> typename ELFT::uint {
+      if (Val > 32767 || Val < -32768)
+        error("Small data relocation delta exceeds 16-bit value");
+      return (Val & 0xffff) | (Reg << 16);
+    };
+    const DefinedRegular<ELFT> *RelSym = dyn_cast<DefinedRegular<ELFT>>(&Body);
+    if (RelSym && RelSym->Section) {
+      const InputSectionBase<ELFT> *Section = RelSym->Section;
+      if (Section->OutSec) {
+        const OutputSectionBase<ELFT> *OutSec = RelSym->Section->OutSec;
+        int64_t MidSda = ((OutSec->getSize() / 2) & ~0x3) + OutSec->getVA();
+        if (OutSec->getName() == ".sdata")
+          return CheckReturn(Body.getVA<ELFT>(A) - MidSda, 13);
+        if (OutSec->getName() == ".sdata2")
+          return CheckReturn(Body.getVA<ELFT>(A) - MidSda, 2);
+      }
+      // Fallback to user-specifed offsets
+      if (Section->Name == ".sdata")
+        return CheckReturn(Body.getVA<ELFT>(A) - int64_t(Config->SDataBase), 13);
+      if (Section->Name == ".sdata2")
+        return CheckReturn(Body.getVA<ELFT>(A) - int64_t(Config->SData2Base), 2);
+    }
+    error("Unable to perform small data relocation without designated section");
+    return 0;
+  }
   }
   llvm_unreachable("Invalid expression");
 }
