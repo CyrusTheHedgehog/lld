@@ -397,11 +397,6 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
         if (OutSec->getName() == ".sdata2")
           return CheckReturn(Body.getVA<ELFT>(A) - MidSda, 2);
       }
-      // Fallback to user-specifed offsets
-      if (Section->Name == ".sdata")
-        return CheckReturn(Body.getVA<ELFT>(A) - int64_t(Config->SDataBase), 13);
-      if (Section->Name == ".sdata2")
-        return CheckReturn(Body.getVA<ELFT>(A) - int64_t(Config->SData2Base), 2);
     }
     error("Unable to perform small data relocation without designated section");
     return 0;

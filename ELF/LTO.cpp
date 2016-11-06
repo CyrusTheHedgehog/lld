@@ -83,7 +83,7 @@ static void undefine(Symbol *S) {
                          nullptr);
 }
 
-void BitcodeCompiler::add(BitcodeFile &F, llvm::StringMap<std::string> *HanafudaPatches) {
+void BitcodeCompiler::add(BitcodeFile &F) {
   lto::InputFile &Obj = *F.Obj;
   if (Obj.getDataLayoutStr().empty())
     fatal("invalid bitcode file: " + F.getName() + " has no datalayout");
@@ -113,7 +113,7 @@ void BitcodeCompiler::add(BitcodeFile &F, llvm::StringMap<std::string> *Hanafuda
     if (R.Prevailing)
       undefine(Sym);
   }
-  checkError(LtoObj->add(std::move(F.Obj), Resols, HanafudaPatches));
+  checkError(LtoObj->add(std::move(F.Obj), Resols));
 }
 
 // Merge all the bitcode files we have seen, codegen the result

@@ -15,8 +15,6 @@
 #include "Strings.h"
 #include "llvm/ADT/CachedHashString.h"
 #include "llvm/ADT/DenseMap.h"
-#include "llvm/ADT/StringMap.h"
-#include "llvm/Support/Regex.h"
 
 namespace lld {
 namespace elf {
@@ -43,8 +41,6 @@ template <class ELFT> class SymbolTable {
   typedef typename ELFT::uint uintX_t;
 
 public:
-  virtual ~SymbolTable() = default;
-
   void addFile(InputFile *File);
   void addCombinedLtoObject();
 
@@ -95,8 +91,6 @@ public:
   void trace(StringRef Name);
   void wrap(StringRef Name);
 
-  const llvm::StringMap<std::string>& getHanafudaPatches() const { return HanafudaPatches; }
-
 private:
   std::vector<SymbolBody *> findAll(const StringMatcher &M);
   std::pair<Symbol *, bool> insert(StringRef &Name);
@@ -139,11 +133,6 @@ private:
   llvm::DenseSet<StringRef> SoNames;
 
   std::unique_ptr<BitcodeCompiler> Lto;
-
-  llvm::StringMap<std::string> HanafudaPatches;
-
-  // Overridden by Hanafuda to handle specialized code-patching triggers
-  virtual bool replaceDefinedSymbolPreTrigger(Symbol *S, StringRef Name) { return false; }
 };
 
 template <class ELFT> struct Symtab { static SymbolTable<ELFT> *X; };

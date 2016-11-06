@@ -31,10 +31,9 @@ using namespace llvm::sys;
 
 enum Flavor {
   Invalid,
-  Gnu,      // -flavor gnu
-  WinLink,  // -flavor link
-  Darwin,   // -flavor darwin
-  Hanafuda, // -flavor hanafuda
+  Gnu,     // -flavor gnu
+  WinLink, // -flavor link
+  Darwin,  // -flavor darwin
 };
 
 LLVM_ATTRIBUTE_NORETURN static void die(const Twine &S) {
@@ -47,7 +46,6 @@ static Flavor getFlavor(StringRef S) {
       .Cases("ld", "ld.lld", "gnu", Gnu)
       .Case("link", WinLink)
       .Case("darwin", Darwin)
-      .Case("hanafuda", Hanafuda)
       .Default(Invalid);
 }
 
@@ -108,8 +106,6 @@ int main(int Argc, const char **Argv) {
     return !coff::link(Args);
   case Darwin:
     return !mach_o::link(Args);
-  case Hanafuda:
-    return !hanafuda::link(Args, true);
   default:
     die("lld is a generic driver.\n"
         "Invoke ld.lld (Unix), ld (Mac) or lld-link (Windows) instead.");

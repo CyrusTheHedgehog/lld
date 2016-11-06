@@ -63,8 +63,8 @@ private:
 
   std::vector<Phdr> createPhdrs();
   void assignAddresses();
-  void assignFileOffsets(uintX_t Off=0);
-  void assignFileOffsetsBinary(uintX_t Off=0);
+  void assignFileOffsets();
+  void assignFileOffsetsBinary();
   void setPhdrs();
   void fixHeaders();
   void fixSectionAlignments();
@@ -99,8 +99,7 @@ StringRef elf::getOutputSectionName(StringRef Name) {
   for (StringRef V :
        {".text.", ".rodata.", ".data.rel.ro.", ".data.", ".bss.",
         ".init_array.", ".fini_array.", ".ctors.", ".dtors.", ".tbss.",
-        ".gcc_except_table.", ".tdata.", ".ARM.exidx.", ".sdata.",
-        ".sdata2."}) {
+        ".gcc_except_table.", ".tdata.", ".ARM.exidx."}) {
     StringRef Prefix = V.drop_back();
     if (Name.startswith(V) || Name == Prefix)
       return Prefix;
@@ -167,7 +166,7 @@ template <class ELFT> void Writer<ELFT>::run() {
     return;
 
   if (Config->Relocatable) {
-    assignFileOffsets(Config->InitialFileOffset);
+    assignFileOffsets();
   } else {
     Phdrs = Script<ELFT>::X->hasPhdrsCommands() ? Script<ELFT>::X->createPhdrs()
                                                 : createPhdrs();
@@ -180,9 +179,9 @@ template <class ELFT> void Writer<ELFT>::run() {
     }
 
     if (!Config->OFormatBinary)
-      assignFileOffsets(Config->InitialFileOffset);
+      assignFileOffsets();
     else
-      assignFileOffsetsBinary(Config->InitialFileOffset);
+      assignFileOffsetsBinary();
 
     setPhdrs();
     fixAbsoluteSymbols();
@@ -191,11 +190,6 @@ template <class ELFT> void Writer<ELFT>::run() {
   openFile();
   if (HasError)
     return;
-  if (Config->OPreWrite) {
-    Config->OPreWrite(Buffer->getBufferStart(), &OutputSections);
-    if (HasError)
-      return;
-  }
   if (!Config->OFormatBinary) {
     writeHeader();
     writeSections();
@@ -586,13 +580,6 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     addOptionalSynthetic("__gnu_local_gp", Out<ELFT>::Got, MipsGPOffset);
   }
 
-  // PPC-EABI supports small-data section relocations in .sdata and .sdata2
-  // relative to the linker-specified _SDA_BASE_ and _SDA2_BASE_ symbols
-  if (Config->EMachine == EM_PPC && !Config->Relocatable) {
-    Symtab<ELFT>::X->addIgnored("_SDA_BASE_");
-    Symtab<ELFT>::X->addIgnored("_SDA2_BASE_");
-  }
-
   // In the assembly for 32 bit x86 the _GLOBAL_OFFSET_TABLE_ symbol
   // is magical and is used to produce a R_386_GOTPC relocation.
   // The R_386_GOTPC relocation value doesn't actually depend on the
@@ -839,8 +826,7 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
   for (InputSection<ELFT> *S : In<ELFT>::Sections)
     addInputSec(S);
 
-  if (!Config->NoImplicitSort)
-    sortSections();
+  sortSections();
 
   unsigned I = 1;
   for (OutputSectionBase<ELFT> *Sec : OutputSections) {
@@ -1159,7 +1145,7 @@ template <class ELFT> void Writer<ELFT>::assignAddresses() {
   uintX_t VA = Config->ImageBase + getHeaderSize<ELFT>();
   uintX_t ThreadBssOffset = 0;
   for (OutputSectionBase<ELFT> *Sec : OutputSections) {
-    uintX_t Alignment = std::max<uintX_t>(Sec->getAlignment(), Config->CommonAlignment);
+    uintX_t Alignment = Sec->getAlignment();
     if (Sec->PageAlign)
       Alignment = std::max<uintX_t>(Alignment, Config->MaxPageSize);
 
@@ -1187,7 +1173,7 @@ template <class ELFT> void Writer<ELFT>::assignAddresses() {
 // executables without any address adjustment.
 template <class ELFT, class uintX_t>
 static uintX_t getFileAlignment(uintX_t Off, OutputSectionBase<ELFT> *Sec) {
-  uintX_t Alignment = std::max<uintX_t>(Sec->getAlignment(), Config->CommonAlignment);
+  uintX_t Alignment = Sec->getAlignment();
   if (Sec->PageAlign)
     Alignment = std::max<uintX_t>(Alignment, Config->MaxPageSize);
   Off = alignTo(Off, Alignment);
@@ -1201,7 +1187,7 @@ static uintX_t getFileAlignment(uintX_t Off, OutputSectionBase<ELFT> *Sec) {
   // this formula: Off2 = Off1 + (VA2 - VA1).
   if (Sec == First)
     return alignTo(Off, Target->MaxPageSize, Sec->getVA());
-  return alignTo(First->getFileOffset() + Sec->getVA() - First->getVA(), Alignment);
+  return First->getFileOffset() + Sec->getVA() - First->getVA();
 }
 
 template <class ELFT, class uintX_t>
@@ -1216,7 +1202,8 @@ void setOffset(OutputSectionBase<ELFT> *Sec, uintX_t &Off) {
   Off += Sec->getSize();
 }
 
-template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary(uintX_t Off) {
+template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary() {
+  uintX_t Off = 0;
   for (OutputSectionBase<ELFT> *Sec : OutputSections)
     if (Sec->getFlags() & SHF_ALLOC)
       setOffset(Sec, Off);
@@ -1224,7 +1211,8 @@ template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary(uintX_t Off) {
 }
 
 // Assign file offsets to output sections.
-template <class ELFT> void Writer<ELFT>::assignFileOffsets(uintX_t Off) {
+template <class ELFT> void Writer<ELFT>::assignFileOffsets() {
+  uintX_t Off = 0;
   setOffset(Out<ELFT>::ElfHeader, Off);
   setOffset(Out<ELFT>::ProgramHeaders, Off);
 

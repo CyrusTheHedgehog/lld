@@ -4,7 +4,6 @@ add_public_tablegen_target(ELFOptionsTableGen)
 
 add_lld_library(lldELF
   Driver.cpp
-  HanafudaDriver.cpp
   DriverUtils.cpp
   EhFrame.cpp
   Error.cpp

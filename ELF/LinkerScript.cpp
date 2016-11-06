@@ -391,7 +391,7 @@ template <class ELFT> void LinkerScript<ELFT>::output(InputSection<ELFT> *S) {
   // Update output section size after adding each section. This is so that
   // SIZEOF works correctly in the case below:
   // .foo { *(.aaa) a = SIZEOF(.foo); *(.bbb) }
-  CurOutSec->setSize(alignTo(Pos - CurOutSec->getVA(), Config->CommonAlignment));
+  CurOutSec->setSize(Pos - CurOutSec->getVA());
 
   if (IsTbss)
     ThreadBssOffset = Pos - Dot;
@@ -436,7 +436,7 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
     if (AssignCmd->Name == ".") {
       // Update to location counter means update to section size.
       Dot = AssignCmd->Expression(Dot);
-      CurOutSec->setSize(alignTo(Dot - CurOutSec->getVA(), Config->CommonAlignment));
+      CurOutSec->setSize(Dot - CurOutSec->getVA());
       return;
     }
     assignSectionSymbol<ELFT>(AssignCmd, CurOutSec, Dot);
@@ -447,7 +447,7 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
   if (auto *DataCmd = dyn_cast<BytesDataCommand>(&Base)) {
     DataCmd->Offset = Dot - CurOutSec->getVA();
     Dot += DataCmd->Size;
-    CurOutSec->setSize(alignTo(Dot - CurOutSec->getVA(), Config->CommonAlignment));
+    CurOutSec->setSize(Dot - CurOutSec->getVA());
     return;
   }
 
@@ -613,7 +613,7 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
   }
 
   // Assign addresses as instructed by linker script SECTIONS sub-commands.
-  Dot = Config->InitialAddrOffset;
+  Dot = 0;
 
   for (const std::unique_ptr<BaseCommand> &Base : Opt.Commands) {
     if (auto *Cmd = dyn_cast<SymbolAssignment>(Base.get())) {
@@ -654,7 +654,7 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
       });
 
   if (HeaderSize <= MinVA && FirstPTLoad != Phdrs.end()) {
-    // If linker script specifies program headers and first PT_LOAD doesn't
+    // If linker script specifies program headers and first PT_LOAD doesn't 
     // have both PHDRS and FILEHDR attributes then do nothing
     if (!Opt.PhdrsCommands.empty()) {
       size_t SegNum = std::distance(Phdrs.begin(), FirstPTLoad);

@@ -81,7 +81,7 @@ mystr:
 # CHECK: .R_PPC_EMB_SDA21:
 # CHECK:    11020:	80 8d 00 00 	lwz 4, 0(13)
 # CHECK:    11024:	80 a2 ff fc 	lwz 5, -4(2)
-  
+
 .sdata
   .long 0xABCDEFAB
 smallstr:

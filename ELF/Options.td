@@ -326,17 +326,3 @@ def disable_verify: F<"disable-verify">;
 def mllvm: S<"mllvm">;
 def save_temps: F<"save-temps">;
 def thinlto_jobs: J<"thinlto-jobs=">, HelpText<"Number of ThinLTO jobs">;
-
-// Hanafuda options
-def hanafuda_base_dol: J<"hanafuda-base-dol=">, MetaVarName<"<dol-file>">,
-  HelpText<"Input .dol file to extract base definitions from">;
-def hanafuda_base_rel: J<"hanafuda-base-rel=">, MetaVarName<"<rel-file>">,
-  HelpText<"Input .rel file to extract base definitions from">;
-def hanafuda_text_section: J<"hanafuda-text-section=">, MetaVarName<"<section-index>">,
-  HelpText<"Section to write patched text definitions into">;
-def hanafuda_data_section: J<"hanafuda-data-section=">, MetaVarName<"<section-index>">,
-  HelpText<"Section to write patched data definitions into">;
-def hanafuda_dol_symbol_list: J<"hanafuda-dol-symbol-list=">, MetaVarName<"<symbol-list-file>">,
-  HelpText<"List file to resolve .dol base definitions">;
-def hanafuda_rel_symbol_list: J<"hanafuda-rel-symbol-list=">, MetaVarName<"<symbol-list-file>">,
-  HelpText<"List file to resolve .rel base definitions">;

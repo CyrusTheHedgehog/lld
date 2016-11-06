@@ -43,7 +43,7 @@ public:
   BitcodeCompiler();
   ~BitcodeCompiler();
 
-  void add(BitcodeFile &F, llvm::StringMap<std::string> *HanafudaPatches = nullptr);
+  void add(BitcodeFile &F);
   std::vector<InputFile *> compile();
 
 private:
