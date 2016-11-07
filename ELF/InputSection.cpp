@@ -380,7 +380,7 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
   case R_PLT_PAGE_PC:
   case R_PAGE_PC:
     return getAArch64Page(Body.getVA<ELFT>(A)) - getAArch64Page(P);
-  case R_SDAREL: {
+  case R_PPC_SDA: {
     auto CheckReturn = [](int64_t Val, uint32_t Reg) -> typename ELFT::uint {
       if (Val > 32767 || Val < -32768)
         error("Small data relocation delta exceeds 16-bit value");
@@ -390,12 +390,15 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
     if (RelSym && RelSym->Section) {
       const InputSectionBase<ELFT> *Section = RelSym->Section;
       if (Section->OutSec) {
+        // Relocate relative to _SDA_BASE_ or _SDA2_BASE_ synthetic symbols.
         const OutputSectionBase<ELFT> *OutSec = RelSym->Section->OutSec;
-        int64_t MidSda = ((OutSec->getSize() / 2) & ~0x3) + OutSec->getVA();
-        if (OutSec->getName() == ".sdata")
-          return CheckReturn(Body.getVA<ELFT>(A) - MidSda, 13);
-        if (OutSec->getName() == ".sdata2")
-          return CheckReturn(Body.getVA<ELFT>(A) - MidSda, 2);
+        if (ElfSym<ELFT>::SdaBase &&
+            (OutSec->getName() == ".sdata" || OutSec->getName() == ".sbss"))
+          return CheckReturn(Body.getVA<ELFT>(A) -
+                             int64_t(ElfSym<ELFT>::SdaBase->Value), 13);
+        if (ElfSym<ELFT>::Sda2Base && OutSec->getName() == ".sdata2")
+          return CheckReturn(Body.getVA<ELFT>(A) -
+                             int64_t(ElfSym<ELFT>::Sda2Base->Value), 2);
       }
     }
     error("Unable to perform small data relocation without designated section");

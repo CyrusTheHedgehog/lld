@@ -994,7 +994,7 @@ RelExpr PPCTargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
   case R_PPC_REL32:
     return R_PC;
   case R_PPC_EMB_SDA21:
-    return R_SDAREL;
+    return R_PPC_SDA;
   default:
     return R_ABS;
   }

@@ -586,6 +586,19 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     addOptionalSynthetic("__gnu_local_gp", Out<ELFT>::Got, MipsGPOffset);
   }
 
+  if (Config->EMachine == EM_PPC && !Config->Relocatable) {
+    // In the event a non-relocatable PPC32 target is being built, reserve
+    // Small Data base registers. These will be relocated midway through
+    // the .sdata and .sdata2 sections (if used). This symbol is meant to
+    // be applied in EABI systems, where r13 and r2 are initialized to these
+    // linker-generated symbols by the C runtime initialization.
+    constexpr OutputSectionBase<ELFT> *NullSec = nullptr;
+    ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic<ELFT>>(
+      addOptionalSynthetic("_SDA_BASE_", NullSec, 0)->body());
+    ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic<ELFT>>(
+      addOptionalSynthetic("_SDA2_BASE_", NullSec, 0)->body());
+  }
+
   // In the assembly for 32 bit x86 the _GLOBAL_OFFSET_TABLE_ symbol
   // is magical and is used to produce a R_386_GOTPC relocation.
   // The R_386_GOTPC relocation value doesn't actually depend on the
@@ -1267,6 +1280,26 @@ template <class ELFT> void Writer<ELFT>::fixAbsoluteSymbols() {
   // __ehdr_start is the location of program headers.
   if (ElfSym<ELFT>::EhdrStart)
     ElfSym<ELFT>::EhdrStart->Value = Out<ELFT>::ProgramHeaders->getVA();
+
+  auto SectionMidpoint = [](OutputSectionBase<ELFT> *Sec) ->
+  typename ELFT::uint {
+    return ((Sec->getSize() / 2) & ~0x3) + Sec->getVA();
+  };
+
+  // PPC-EABI systems will need the _SDA_BASE_ and _SDA2_BASE_ symbols
+  // synthesized for use by C runtime init. The section midpoints are used
+  // to maximize addressing range.
+  if (ElfSym<ELFT>::SdaBase) {
+    OutputSectionBase<ELFT> *Sec = findSection(".sdata");
+    if (!Sec) Sec = findSection(".sbss");
+    if (Sec)
+      ElfSym<ELFT>::SdaBase->Value = SectionMidpoint(Sec);
+  }
+  if (ElfSym<ELFT>::Sda2Base) {
+    OutputSectionBase<ELFT> *Sec = findSection(".sdata2");
+    if (Sec)
+      ElfSym<ELFT>::Sda2Base->Value = SectionMidpoint(Sec);
+  }
 
   auto Set = [](DefinedRegular<ELFT> *S1, DefinedRegular<ELFT> *S2, uintX_t V) {
     if (S1)

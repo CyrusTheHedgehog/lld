@@ -48,6 +48,7 @@ enum RelExpr {
   R_PPC_OPD,
   R_PPC_PLT_OPD,
   R_PPC_TOC,
+  R_PPC_SDA,
   R_RELAX_GOT_PC,
   R_RELAX_GOT_PC_NOPIC,
   R_RELAX_TLS_GD_TO_IE,
@@ -70,7 +71,6 @@ enum RelExpr {
   R_TLSGD_PC,
   R_TLSLD,
   R_TLSLD_PC,
-  R_SDAREL,
 };
 
 // Architecture-neutral representation of relocation.

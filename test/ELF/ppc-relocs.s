@@ -74,13 +74,21 @@ mystr:
 # CHECK:    1101c:       00 01 10 20
 
 .section .R_PPC_EMB_SDA21,"ax",@progbits
+  lis 13, _SDA_BASE_@ha
+  ori 13, 13, _SDA_BASE_@l
+  lis 2, _SDA2_BASE_@ha
+  ori 2, 2, _SDA2_BASE_@l
   lwz 4, smallstr@sdarx(0)
   lwz 5, smallstr2@sdarx(0)
 
 # CHECK: Disassembly of section .R_PPC_EMB_SDA21:
 # CHECK: .R_PPC_EMB_SDA21:
-# CHECK:    11020:	80 8d 00 00 	lwz 4, 0(13)
-# CHECK:    11024:	80 a2 ff fc 	lwz 5, -4(2)
+# CHECK: 11020:	3d a0 00 01 	lis 13, 1
+# CHECK: 11024:	61 ad 20 04 	ori 13, 13, 8196
+# CHECK: 11028:	3c 40 00 01 	lis 2, 1
+# CHECK: 1102c:	60 42 00 d8 	ori 2, 2, 216
+# CHECK: 11030:	80 8d 00 00 	lwz 4, 0(13)
+# CHECK: 11034:	80 a2 ff fc 	lwz 5, -4(2)
 
 .sdata
   .long 0xABCDEFAB
