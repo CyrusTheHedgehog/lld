@@ -29,11 +29,28 @@
 #include "Symbols.h"
 #include "Target.h"
 #include "Writer.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/ELF.h"
+#include "llvm/Support/Endian.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include <algorithm>
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
 
 using namespace llvm;
 using namespace llvm::ELF;
@@ -104,8 +121,8 @@ template <class ELFT> static bool isDiscarded(InputSectionBase<ELFT> *S) {
   return !S || !S->Live;
 }
 
-template <class ELFT> LinkerScript<ELFT>::LinkerScript() {}
-template <class ELFT> LinkerScript<ELFT>::~LinkerScript() {}
+template <class ELFT> LinkerScript<ELFT>::LinkerScript() = default;
+template <class ELFT> LinkerScript<ELFT>::~LinkerScript() = default;
 
 template <class ELFT>
 bool LinkerScript<ELFT>::shouldKeep(InputSectionBase<ELFT> *S) {
@@ -176,16 +193,18 @@ void LinkerScript<ELFT>::computeInputSections(InputSectionDescription *I) {
   // and attach them to I.
   for (SectionPattern &Pat : I->SectionPatterns) {
     size_t SizeBefore = I->Sections.size();
-    for (ObjectFile<ELFT> *F : Symtab<ELFT>::X->getObjectFiles()) {
-      StringRef Filename = sys::path::filename(F->getName());
-      if (!I->FilePat.match(Filename) || Pat.ExcludedFilePat.match(Filename))
+
+    for (InputSectionBase<ELFT> *S : Symtab<ELFT>::X->Sections) {
+      if (isDiscarded(S) || S->OutSec)
         continue;
 
-      for (InputSectionBase<ELFT> *S : F->getSections())
-        if (!isDiscarded(S) && !S->OutSec && Pat.SectionPat.match(S->Name))
-          I->Sections.push_back(S);
-      if (Pat.SectionPat.match("COMMON"))
-        I->Sections.push_back(InputSection<ELFT>::CommonInputSection);
+      StringRef Filename;
+      if (elf::ObjectFile<ELFT> *F = S->getFile())
+        Filename = sys::path::filename(F->getName());
+
+      if (I->FilePat.match(Filename) && !Pat.ExcludedFilePat.match(Filename) &&
+          Pat.SectionPat.match(S->Name))
+        I->Sections.push_back(S);
     }
 
     // Sort sections as instructed by SORT-family commands and --sort-section
@@ -293,7 +312,6 @@ void LinkerScript<ELFT>::addSection(OutputSectionFactory<ELFT> &Factory,
 
 template <class ELFT>
 void LinkerScript<ELFT>::processCommands(OutputSectionFactory<ELFT> &Factory) {
-
   for (unsigned I = 0; I < Opt.Commands.size(); ++I) {
     auto Iter = Opt.Commands.begin() + I;
     const std::unique_ptr<BaseCommand> &Base1 = *Iter;
@@ -347,11 +365,11 @@ void LinkerScript<ELFT>::processCommands(OutputSectionFactory<ELFT> &Factory) {
 template <class ELFT>
 void LinkerScript<ELFT>::createSections(OutputSectionFactory<ELFT> &Factory) {
   processCommands(Factory);
+
   // Add orphan sections.
-  for (ObjectFile<ELFT> *F : Symtab<ELFT>::X->getObjectFiles())
-    for (InputSectionBase<ELFT> *S : F->getSections())
-      if (!isDiscarded(S) && !S->OutSec)
-        addSection(Factory, S, getOutputSectionName(S->Name));
+  for (InputSectionBase<ELFT> *S : Symtab<ELFT>::X->Sections)
+    if (!isDiscarded(S) && !S->OutSec)
+      addSection(Factory, S, getOutputSectionName(S->Name));
 }
 
 // Sets value of a section-defined symbol. Two kinds of
@@ -609,7 +627,6 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
 
     // Continue from where we found it.
     CmdIndex = (Pos - Opt.Commands.begin()) + 1;
-    continue;
   }
 
   // Assign addresses as instructed by linker script SECTIONS sub-commands.
