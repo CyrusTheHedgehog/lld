@@ -592,11 +592,14 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     // the .sdata and .sdata2 sections (if used). This symbol is meant to
     // be applied in EABI systems, where r13 and r2 are initialized to these
     // linker-generated symbols by the C runtime initialization.
+    Symbol *Sym;
     constexpr OutputSectionBase<ELFT> *NullSec = nullptr;
-    ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic<ELFT>>(
-      addOptionalSynthetic("_SDA_BASE_", NullSec, 0)->body());
-    ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic<ELFT>>(
-      addOptionalSynthetic("_SDA2_BASE_", NullSec, 0)->body());
+    Sym = addOptionalSynthetic("_SDA_BASE_", NullSec, 0);
+    if (Sym)
+      ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic<ELFT>>(Sym->body());
+    Sym = addOptionalSynthetic("_SDA2_BASE_", NullSec, 0);
+    if (Sym)
+      ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic<ELFT>>(Sym->body());
   }
 
   // In the assembly for 32 bit x86 the _GLOBAL_OFFSET_TABLE_ symbol
