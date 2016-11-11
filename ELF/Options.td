@@ -177,6 +177,9 @@ def strip_all: F<"strip-all">, HelpText<"Strip all symbols">;
 
 def strip_debug: F<"strip-debug">, HelpText<"Strip debugging information">;
 
+def symbol_ordering_file: S<"symbol-ordering-file">,
+  HelpText<"Layout sections in the order specified by symbol file">;
+
 def sysroot: J<"sysroot=">, HelpText<"Set the system root">;
 
 def target1_rel: F<"target1-rel">, HelpText<"Interpret R_ARM_TARGET1 as R_ARM_REL32">;
@@ -244,7 +247,7 @@ def alias_o_output: Joined<["--"], "output=">, Alias<o>;
 def alias_o_output2 : Separate<["--"], "output">, Alias<o>;
 def alias_pie_pic_executable: F<"pic-executable">, Alias<pie>;
 def alias_relocatable_r: Flag<["-"], "r">, Alias<relocatable>;
-def alias_rpath_R: Joined<["-"], "R">, Alias<rpath>;
+def alias_rpath_R: JoinedOrSeparate<["-"], "R">, Alias<rpath>;
 def alias_rpath_rpath: J<"rpath=">, Alias<rpath>;
 def alias_script_T: JoinedOrSeparate<["-"], "T">, Alias<script>;
 def alias_shared_Bshareable: F<"Bshareable">, Alias<shared>;
@@ -301,6 +304,7 @@ def no_warn_mismatch: F<"no-warn-mismatch">;
 def rpath_link: S<"rpath-link">;
 def rpath_link_eq: J<"rpath-link=">;
 def sort_common: F<"sort-common">;
+def stats: F<"stats">;
 def warn_execstack: F<"warn-execstack">;
 def warn_shared_textrel: F<"warn-shared-textrel">;
 def EB : F<"EB">;

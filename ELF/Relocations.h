@@ -82,11 +82,12 @@ struct Relocation {
   SymbolBody *Sym;
 };
 
-template <class ELFT>
-void scanRelocations(InputSectionBase<ELFT> &, const typename ELFT::Shdr &);
+template <class ELFT> void scanRelocations(InputSectionBase<ELFT> &);
+
+template <class ELFT> void createThunks(InputSectionBase<ELFT> &);
 
 template <class ELFT>
-void createThunks(InputSectionBase<ELFT> &, const typename ELFT::Shdr &);
+std::string getLocation(InputSectionBase<ELFT> &S, typename ELFT::uint Offset);
 
 template <class ELFT>
 static inline typename ELFT::uint getAddend(const typename ELFT::Rel &Rel) {

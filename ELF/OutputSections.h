@@ -31,7 +31,6 @@ template <class ELFT> class EhInputSection;
 template <class ELFT> class InputSection;
 template <class ELFT> class InputSectionBase;
 template <class ELFT> class MergeInputSection;
-template <class ELFT> class MipsReginfoInputSection;
 template <class ELFT> class OutputSection;
 template <class ELFT> class ObjectFile;
 template <class ELFT> class SharedFile;
@@ -43,10 +42,8 @@ template <class ELFT> class DefinedRegular;
 // input sections, others are created by the linker.
 // The writer creates multiple OutputSections and assign them unique,
 // non-overlapping file offsets and VAs.
-template <class ELFT> class OutputSectionBase {
+class OutputSectionBase {
 public:
-  typedef typename ELFT::uint uintX_t;
-  typedef typename ELFT::Shdr Elf_Shdr;
   enum Kind {
     Base,
     Dynamic,
@@ -54,12 +51,8 @@ public:
     EHFrameHdr,
     GnuHashTable,
     Got,
-    GotPlt,
     HashTable,
     Merge,
-    MipsReginfo,
-    MipsOptions,
-    MipsAbiFlags,
     Plt,
     Regular,
     Reloc,
@@ -70,38 +63,25 @@ public:
     VersTable
   };
 
-  OutputSectionBase(StringRef Name, uint32_t Type, uintX_t Flags);
-  void setVA(uintX_t VA) { Header.sh_addr = VA; }
-  uintX_t getVA() const { return Header.sh_addr; }
-  void setLMAOffset(uintX_t LMAOff) { LMAOffset = LMAOff; }
-  uintX_t getLMA() const { return Header.sh_addr + LMAOffset; }
-  void setFileOffset(uintX_t Off) { Header.sh_offset = Off; }
-  uintX_t getFileOffset() { return Header.sh_offset; }
-  void setSHName(unsigned Val) { Header.sh_name = Val; }
-  void writeHeaderTo(Elf_Shdr *SHdr);
+  OutputSectionBase(StringRef Name, uint32_t Type, uint64_t Flags);
+  void setLMAOffset(uint64_t LMAOff) { LMAOffset = LMAOff; }
+  uint64_t getLMA() const { return Addr + LMAOffset; }
+  template <typename ELFT> void writeHeaderTo(typename ELFT::Shdr *SHdr);
   StringRef getName() const { return Name; }
 
-  virtual void addSection(InputSectionBase<ELFT> *C) {}
+  virtual void addSection(InputSectionData *C) {}
   virtual Kind getKind() const { return Base; }
-  static bool classof(const OutputSectionBase<ELFT> *B) {
+  static bool classof(const OutputSectionBase *B) {
     return B->getKind() == Base;
   }
 
   unsigned SectionIndex;
 
-  // Returns the size of the section in the output file.
-  uintX_t getSize() const { return Header.sh_size; }
-  void setSize(uintX_t Val) { Header.sh_size = Val; }
-  uintX_t getFlags() const { return Header.sh_flags; }
-  void updateFlags(uintX_t Val) { Header.sh_flags |= Val; }
   uint32_t getPhdrFlags() const;
-  uintX_t getFileOff() const { return Header.sh_offset; }
-  uintX_t getAlignment() const { return Header.sh_addralign; }
-  uint32_t getType() const { return Header.sh_type; }
 
-  void updateAlignment(uintX_t Alignment) {
-    if (Alignment > Header.sh_addralign)
-      Header.sh_addralign = Alignment;
+  void updateAlignment(uint64_t Alignment) {
+    if (Alignment > Addralign)
+      Addralign = Alignment;
   }
 
   // If true, this section will be page aligned on disk.
@@ -114,7 +94,7 @@ public:
   // between their file offsets should be equal to difference between their
   // virtual addresses. To compute some section offset we use the following
   // formula: Off = Off_first + VA - VA_first.
-  OutputSectionBase<ELFT> *FirstInPtLoad = nullptr;
+  OutputSectionBase *FirstInPtLoad = nullptr;
 
   virtual void finalize() {}
   virtual void finalizePieces() {}
@@ -122,14 +102,23 @@ public:
   virtual void writeTo(uint8_t *Buf) {}
   virtual ~OutputSectionBase() = default;
 
-protected:
   StringRef Name;
-  Elf_Shdr Header;
-  uintX_t LMAOffset = 0;
+
+  // The following fields correspond to Elf_Shdr members.
+  uint64_t Size = 0;
+  uint64_t Entsize = 0;
+  uint64_t Addralign = 0;
+  uint64_t Offset = 0;
+  uint64_t Flags = 0;
+  uint64_t LMAOffset = 0;
+  uint64_t Addr = 0;
+  uint32_t ShName = 0;
+  uint32_t Type = 0;
+  uint32_t Info = 0;
+  uint32_t Link = 0;
 };
 
-template <class ELFT>
-class GdbIndexSection final : public OutputSectionBase<ELFT> {
+template <class ELFT> class GdbIndexSection final : public OutputSectionBase {
   typedef typename ELFT::uint uintX_t;
 
   const unsigned OffsetTypeSize = 4;
@@ -153,8 +142,7 @@ private:
   uint32_t CuTypesOffset;
 };
 
-template <class ELFT> class GotSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+template <class ELFT> class GotSection final : public OutputSectionBase {
   typedef typename ELFT::uint uintX_t;
 
 public:
@@ -170,8 +158,10 @@ public:
   uintX_t getMipsGotOffset(const SymbolBody &B, uintX_t Addend) const;
   uintX_t getGlobalDynAddr(const SymbolBody &B) const;
   uintX_t getGlobalDynOffset(const SymbolBody &B) const;
-  typename Base::Kind getKind() const override { return Base::Got; }
-  static bool classof(const Base *B) { return B->getKind() == Base::Got; }
+  Kind getKind() const override { return Got; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == Got;
+  }
 
   // Returns the symbol which corresponds to the first entry of the global part
   // of GOT on MIPS platform. It is required to fill up MIPS-specific dynamic
@@ -187,7 +177,7 @@ public:
   // after 'local' and 'global' entries.
   uintX_t getMipsTlsOffset() const;
 
-  uintX_t getTlsIndexVA() { return Base::getVA() + TlsIndexOff; }
+  uintX_t getTlsIndexVA() { return this->Addr + TlsIndexOff; }
   uint32_t getTlsIndexOff() const { return TlsIndexOff; }
 
   // Flag to force GOT to be in output if we have relocations
@@ -199,7 +189,7 @@ private:
   uint32_t TlsIndexOff = -1;
   uint32_t MipsPageEntries = 0;
   // Output sections referenced by MIPS GOT relocations.
-  llvm::SmallPtrSet<const OutputSectionBase<ELFT> *, 10> MipsOutSections;
+  llvm::SmallPtrSet<const OutputSectionBase *, 10> MipsOutSections;
   llvm::DenseMap<uintX_t, size_t> MipsLocalGotPos;
 
   // MIPS ABI requires to create unique GOT entry for each Symbol/Addend
@@ -220,26 +210,7 @@ private:
   void writeMipsGot(uint8_t *Buf);
 };
 
-template <class ELFT>
-class GotPltSection final : public OutputSectionBase<ELFT> {
-  typedef typename ELFT::uint uintX_t;
-  typedef OutputSectionBase<ELFT> Base;
-
-public:
-  GotPltSection();
-  void finalize() override;
-  void writeTo(uint8_t *Buf) override;
-  void addEntry(SymbolBody &Sym);
-  bool empty() const;
-  typename Base::Kind getKind() const override { return Base::GotPlt; }
-  static bool classof(const Base *B) { return B->getKind() == Base::GotPlt; }
-
-private:
-  std::vector<const SymbolBody *> Entries;
-};
-
-template <class ELFT> class PltSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+template <class ELFT> class PltSection final : public OutputSectionBase {
   typedef typename ELFT::uint uintX_t;
 
 public:
@@ -248,8 +219,10 @@ public:
   void writeTo(uint8_t *Buf) override;
   void addEntry(SymbolBody &Sym);
   bool empty() const { return Entries.empty(); }
-  typename Base::Kind getKind() const override { return Base::Plt; }
-  static bool classof(const Base *B) { return B->getKind() == Base::Plt; }
+  Kind getKind() const override { return Plt; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == Plt;
+  }
 
 private:
   std::vector<std::pair<const SymbolBody *, unsigned>> Entries;
@@ -265,7 +238,7 @@ public:
       : Type(Type), Sym(Sym), InputSec(InputSec), OffsetInSec(OffsetInSec),
         UseSymVA(UseSymVA), Addend(Addend) {}
 
-  DynamicReloc(uint32_t Type, const OutputSectionBase<ELFT> *OutputSec,
+  DynamicReloc(uint32_t Type, const OutputSectionBase *OutputSec,
                uintX_t OffsetInSec, bool UseSymVA, SymbolBody *Sym,
                uintX_t Addend)
       : Type(Type), Sym(Sym), OutputSec(OutputSec), OffsetInSec(OffsetInSec),
@@ -274,14 +247,14 @@ public:
   uintX_t getOffset() const;
   uintX_t getAddend() const;
   uint32_t getSymIndex() const;
-  const OutputSectionBase<ELFT> *getOutputSec() const { return OutputSec; }
+  const OutputSectionBase *getOutputSec() const { return OutputSec; }
 
   uint32_t Type;
 
 private:
   SymbolBody *Sym;
   const InputSectionBase<ELFT> *InputSec = nullptr;
-  const OutputSectionBase<ELFT> *OutputSec = nullptr;
+  const OutputSectionBase *OutputSec = nullptr;
   uintX_t OffsetInSec;
   bool UseSymVA;
   uintX_t Addend;
@@ -293,8 +266,8 @@ struct SymbolTableEntry {
 };
 
 template <class ELFT>
-class SymbolTableSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+class SymbolTableSection final : public OutputSectionBase {
+  typedef OutputSectionBase Base;
 
 public:
   typedef typename ELFT::Shdr Elf_Shdr;
@@ -320,7 +293,7 @@ private:
   void writeLocalSymbols(uint8_t *&Buf);
   void writeGlobalSymbols(uint8_t *Buf);
 
-  const OutputSectionBase<ELFT> *getOutputSection(SymbolBody *Sym);
+  const OutputSectionBase *getOutputSection(SymbolBody *Sym);
 
   // A vector of symbols and their string table offsets.
   std::vector<SymbolTableEntry> Symbols;
@@ -335,17 +308,18 @@ private:
 // The section shall contain an array of Elf_Verdef structures, optionally
 // followed by an array of Elf_Verdaux structures.
 template <class ELFT>
-class VersionDefinitionSection final : public OutputSectionBase<ELFT> {
+class VersionDefinitionSection final : public OutputSectionBase {
   typedef typename ELFT::Verdef Elf_Verdef;
   typedef typename ELFT::Verdaux Elf_Verdaux;
-  typedef OutputSectionBase<ELFT> Base;
 
 public:
   VersionDefinitionSection();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
-  typename Base::Kind getKind() const override { return Base::VersDef; }
-  static bool classof(const Base *B) { return B->getKind() == Base::VersDef; }
+  Kind getKind() const override { return VersDef; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == VersDef;
+  }
 
 private:
   void writeOne(uint8_t *Buf, uint32_t Index, StringRef Name, size_t NameOff);
@@ -360,16 +334,17 @@ private:
 // The values 0 and 1 are reserved. All other values are used for versions in
 // the own object or in any of the dependencies.
 template <class ELFT>
-class VersionTableSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+class VersionTableSection final : public OutputSectionBase {
   typedef typename ELFT::Versym Elf_Versym;
 
 public:
   VersionTableSection();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
-  typename Base::Kind getKind() const override { return Base::VersTable; }
-  static bool classof(const Base *B) { return B->getKind() == Base::VersTable; }
+  Kind getKind() const override { return VersTable; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == VersTable;
+  }
 };
 
 // The .gnu.version_r section defines the version identifiers used by
@@ -378,8 +353,7 @@ public:
 // a reference to a linked list of Elf_Vernaux data structures which define the
 // mapping from version identifiers to version names.
 template <class ELFT>
-class VersionNeedSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+class VersionNeedSection final : public OutputSectionBase {
   typedef typename ELFT::Verneed Elf_Verneed;
   typedef typename ELFT::Vernaux Elf_Vernaux;
 
@@ -396,16 +370,16 @@ public:
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
   size_t getNeedNum() const { return Needed.size(); }
-  typename Base::Kind getKind() const override { return Base::VersNeed; }
-  static bool classof(const Base *B) { return B->getKind() == Base::VersNeed; }
+  Kind getKind() const override { return VersNeed; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == VersNeed;
+  }
 };
 
-template <class ELFT>
-class RelocationSection final : public OutputSectionBase<ELFT> {
+template <class ELFT> class RelocationSection final : public OutputSectionBase {
   typedef typename ELFT::Rel Elf_Rel;
   typedef typename ELFT::Rela Elf_Rela;
   typedef typename ELFT::uint uintX_t;
-  typedef OutputSectionBase<ELFT> Base;
 
 public:
   RelocationSection(StringRef Name, bool Sort);
@@ -414,9 +388,11 @@ public:
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
   bool hasRelocs() const { return !Relocs.empty(); }
-  typename Base::Kind getKind() const override { return Base::Reloc; }
+  Kind getKind() const override { return Reloc; }
   size_t getRelativeRelocCount() const { return NumRelativeRelocs; }
-  static bool classof(const Base *B) { return B->getKind() == Base::Reloc; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == Reloc;
+  }
 
 private:
   bool Sort;
@@ -424,9 +400,7 @@ private:
   std::vector<DynamicReloc<ELFT>> Relocs;
 };
 
-template <class ELFT>
-class OutputSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+template <class ELFT> class OutputSection final : public OutputSectionBase {
 
 public:
   typedef typename ELFT::Shdr Elf_Shdr;
@@ -435,33 +409,37 @@ public:
   typedef typename ELFT::Rela Elf_Rela;
   typedef typename ELFT::uint uintX_t;
   OutputSection(StringRef Name, uint32_t Type, uintX_t Flags);
-  void addSection(InputSectionBase<ELFT> *C) override;
+  void addSection(InputSectionData *C) override;
+  void sort(std::function<unsigned(InputSection<ELFT> *S)> Order);
   void sortInitFini();
   void sortCtorsDtors();
   void writeTo(uint8_t *Buf) override;
   void finalize() override;
   void assignOffsets() override;
-  typename Base::Kind getKind() const override { return Base::Regular; }
-  static bool classof(const Base *B) { return B->getKind() == Base::Regular; }
+  Kind getKind() const override { return Regular; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == Regular;
+  }
   std::vector<InputSection<ELFT> *> Sections;
 };
 
 template <class ELFT>
-class MergeOutputSection final : public OutputSectionBase<ELFT> {
+class MergeOutputSection final : public OutputSectionBase {
   typedef typename ELFT::uint uintX_t;
-  typedef OutputSectionBase<ELFT> Base;
 
 public:
   MergeOutputSection(StringRef Name, uint32_t Type, uintX_t Flags,
                      uintX_t Alignment);
-  void addSection(InputSectionBase<ELFT> *S) override;
+  void addSection(InputSectionData *S) override;
   void writeTo(uint8_t *Buf) override;
   unsigned getOffset(llvm::CachedHashStringRef Val);
   void finalize() override;
   void finalizePieces() override;
   bool shouldTailMerge() const;
-  typename Base::Kind getKind() const override { return Base::Merge; }
-  static bool classof(const Base *B) { return B->getKind() == Base::Merge; }
+  Kind getKind() const override { return Merge; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == Merge;
+  }
 
 private:
   llvm::StringTableBuilder Builder;
@@ -474,13 +452,11 @@ struct CieRecord {
 };
 
 // Output section for .eh_frame.
-template <class ELFT>
-class EhOutputSection final : public OutputSectionBase<ELFT> {
+template <class ELFT> class EhOutputSection final : public OutputSectionBase {
   typedef typename ELFT::uint uintX_t;
   typedef typename ELFT::Shdr Elf_Shdr;
   typedef typename ELFT::Rel Elf_Rel;
   typedef typename ELFT::Rela Elf_Rela;
-  typedef OutputSectionBase<ELFT> Base;
 
 public:
   EhOutputSection();
@@ -488,9 +464,11 @@ public:
   void finalize() override;
   bool empty() const { return Sections.empty(); }
 
-  void addSection(InputSectionBase<ELFT> *S) override;
-  typename Base::Kind getKind() const override { return Base::EHFrame; }
-  static bool classof(const Base *B) { return B->getKind() == Base::EHFrame; }
+  void addSection(InputSectionData *S) override;
+  Kind getKind() const override { return EHFrame; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == EHFrame;
+  }
 
   size_t NumFdes = 0;
 
@@ -516,48 +494,45 @@ private:
 };
 
 template <class ELFT>
-class StringTableSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+class StringTableSection final : public OutputSectionBase {
 
 public:
   typedef typename ELFT::uint uintX_t;
   StringTableSection(StringRef Name, bool Dynamic);
   unsigned addString(StringRef S, bool HashIt = true);
   void writeTo(uint8_t *Buf) override;
-  unsigned getSize() const { return Size; }
-  void finalize() override { this->Header.sh_size = getSize(); }
   bool isDynamic() const { return Dynamic; }
-  typename Base::Kind getKind() const override { return Base::StrTable; }
-  static bool classof(const Base *B) { return B->getKind() == Base::StrTable; }
+  Kind getKind() const override { return StrTable; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == StrTable;
+  }
 
 private:
   const bool Dynamic;
   llvm::DenseMap<StringRef, unsigned> StringMap;
   std::vector<StringRef> Strings;
-  unsigned Size = 1; // ELF string tables start with a NUL byte, so 1.
 };
 
-template <class ELFT>
-class HashTableSection final : public OutputSectionBase<ELFT> {
+template <class ELFT> class HashTableSection final : public OutputSectionBase {
   typedef typename ELFT::Word Elf_Word;
-  typedef OutputSectionBase<ELFT> Base;
 
 public:
   HashTableSection();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
-  typename Base::Kind getKind() const override { return Base::HashTable; }
-  static bool classof(const Base *B) { return B->getKind() == Base::HashTable; }
+  Kind getKind() const override { return HashTable; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == HashTable;
+  }
 };
 
 // Outputs GNU Hash section. For detailed explanation see:
 // https://blogs.oracle.com/ali/entry/gnu_hash_elf_sections
 template <class ELFT>
-class GnuHashTableSection final : public OutputSectionBase<ELFT> {
+class GnuHashTableSection final : public OutputSectionBase {
   typedef typename ELFT::Off Elf_Off;
   typedef typename ELFT::Word Elf_Word;
   typedef typename ELFT::uint uintX_t;
-  typedef OutputSectionBase<ELFT> Base;
 
 public:
   GnuHashTableSection();
@@ -567,9 +542,9 @@ public:
   // Adds symbols to the hash table.
   // Sorts the input to satisfy GNU hash section requirements.
   void addSymbols(std::vector<SymbolTableEntry> &Symbols);
-  typename Base::Kind getKind() const override { return Base::GnuHashTable; }
-  static bool classof(const Base *B) {
-    return B->getKind() == Base::GnuHashTable;
+  Kind getKind() const override { return GnuHashTable; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == GnuHashTable;
   }
 
 private:
@@ -593,9 +568,7 @@ private:
   unsigned Shift2;
 };
 
-template <class ELFT>
-class DynamicSection final : public OutputSectionBase<ELFT> {
-  typedef OutputSectionBase<ELFT> Base;
+template <class ELFT> class DynamicSection final : public OutputSectionBase {
   typedef typename ELFT::Dyn Elf_Dyn;
   typedef typename ELFT::Rel Elf_Rel;
   typedef typename ELFT::Rela Elf_Rela;
@@ -610,13 +583,16 @@ class DynamicSection final : public OutputSectionBase<ELFT> {
   struct Entry {
     int32_t Tag;
     union {
-      OutputSectionBase<ELFT> *OutSec;
+      OutputSectionBase *OutSec;
+      InputSection<ELFT> *InSec;
       uint64_t Val;
       const SymbolBody *Sym;
     };
-    enum KindT { SecAddr, SecSize, SymAddr, PlainInt } Kind;
-    Entry(int32_t Tag, OutputSectionBase<ELFT> *OutSec, KindT Kind = SecAddr)
+    enum KindT { SecAddr, SecSize, SymAddr, PlainInt, InSecAddr } Kind;
+    Entry(int32_t Tag, OutputSectionBase *OutSec, KindT Kind = SecAddr)
         : Tag(Tag), OutSec(OutSec), Kind(Kind) {}
+    Entry(int32_t Tag, InputSection<ELFT> *Sec)
+        : Tag(Tag), InSec(Sec), Kind(InSecAddr) {}
     Entry(int32_t Tag, uint64_t Val) : Tag(Tag), Val(Val), Kind(PlainInt) {}
     Entry(int32_t Tag, const SymbolBody *Sym)
         : Tag(Tag), Sym(Sym), Kind(SymAddr) {}
@@ -631,67 +607,14 @@ public:
   DynamicSection();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
-  typename Base::Kind getKind() const override { return Base::Dynamic; }
-  static bool classof(const Base *B) { return B->getKind() == Base::Dynamic; }
+  Kind getKind() const override { return Dynamic; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == Dynamic;
+  }
 
 private:
   void addEntries();
   void Add(Entry E) { Entries.push_back(E); }
-};
-
-template <class ELFT>
-class MipsReginfoOutputSection final : public OutputSectionBase<ELFT> {
-  typedef llvm::object::Elf_Mips_RegInfo<ELFT> Elf_Mips_RegInfo;
-  typedef OutputSectionBase<ELFT> Base;
-
-public:
-  MipsReginfoOutputSection();
-  void writeTo(uint8_t *Buf) override;
-  void addSection(InputSectionBase<ELFT> *S) override;
-  typename Base::Kind getKind() const override { return Base::MipsReginfo; }
-  static bool classof(const Base *B) {
-    return B->getKind() == Base::MipsReginfo;
-  }
-
-private:
-  uint32_t GprMask = 0;
-};
-
-template <class ELFT>
-class MipsOptionsOutputSection final : public OutputSectionBase<ELFT> {
-  typedef llvm::object::Elf_Mips_Options<ELFT> Elf_Mips_Options;
-  typedef llvm::object::Elf_Mips_RegInfo<ELFT> Elf_Mips_RegInfo;
-  typedef OutputSectionBase<ELFT> Base;
-
-public:
-  MipsOptionsOutputSection();
-  void writeTo(uint8_t *Buf) override;
-  void addSection(InputSectionBase<ELFT> *S) override;
-  typename Base::Kind getKind() const override { return Base::MipsOptions; }
-  static bool classof(const Base *B) {
-    return B->getKind() == Base::MipsOptions;
-  }
-
-private:
-  uint32_t GprMask = 0;
-};
-
-template <class ELFT>
-class MipsAbiFlagsOutputSection final : public OutputSectionBase<ELFT> {
-  typedef llvm::object::Elf_Mips_ABIFlags<ELFT> Elf_Mips_ABIFlags;
-  typedef OutputSectionBase<ELFT> Base;
-
-public:
-  MipsAbiFlagsOutputSection();
-  void writeTo(uint8_t *Buf) override;
-  void addSection(InputSectionBase<ELFT> *S) override;
-  typename Base::Kind getKind() const override { return Base::MipsAbiFlags; }
-  static bool classof(const Base *B) {
-    return B->getKind() == Base::MipsAbiFlags;
-  }
-
-private:
-  Elf_Mips_ABIFlags Flags;
 };
 
 // --eh-frame-hdr option tells linker to construct a header for all the
@@ -703,19 +626,17 @@ private:
 // Detailed info about internals can be found in Ian Lance Taylor's blog:
 // http://www.airs.com/blog/archives/460 (".eh_frame")
 // http://www.airs.com/blog/archives/462 (".eh_frame_hdr")
-template <class ELFT>
-class EhFrameHeader final : public OutputSectionBase<ELFT> {
+template <class ELFT> class EhFrameHeader final : public OutputSectionBase {
   typedef typename ELFT::uint uintX_t;
-  typedef OutputSectionBase<ELFT> Base;
 
 public:
   EhFrameHeader();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
   void addFde(uint32_t Pc, uint32_t FdeVA);
-  typename Base::Kind getKind() const override { return Base::EHFrameHdr; }
-  static bool classof(const Base *B) {
-    return B->getKind() == Base::EHFrameHdr;
+  Kind getKind() const override { return EHFrameHdr; }
+  static bool classof(const OutputSectionBase *B) {
+    return B->getKind() == EHFrameHdr;
   }
 
 private:
@@ -740,12 +661,11 @@ template <class ELFT> struct Out {
   static EhOutputSection<ELFT> *EhFrame;
   static GdbIndexSection<ELFT> *GdbIndex;
   static GnuHashTableSection<ELFT> *GnuHashTab;
-  static GotPltSection<ELFT> *GotPlt;
   static GotSection<ELFT> *Got;
   static HashTableSection<ELFT> *HashTab;
   static OutputSection<ELFT> *Bss;
   static OutputSection<ELFT> *MipsRldMap;
-  static OutputSectionBase<ELFT> *Opd;
+  static OutputSectionBase *Opd;
   static uint8_t *OpdBuf;
   static PltSection<ELFT> *Plt;
   static RelocationSection<ELFT> *RelaDyn;
@@ -759,12 +679,12 @@ template <class ELFT> struct Out {
   static VersionTableSection<ELFT> *VerSym;
   static VersionNeedSection<ELFT> *VerNeed;
   static Elf_Phdr *TlsPhdr;
-  static OutputSectionBase<ELFT> *DebugInfo;
-  static OutputSectionBase<ELFT> *ElfHeader;
-  static OutputSectionBase<ELFT> *ProgramHeaders;
-  static OutputSectionBase<ELFT> *PreinitArray;
-  static OutputSectionBase<ELFT> *InitArray;
-  static OutputSectionBase<ELFT> *FiniArray;
+  static OutputSectionBase *DebugInfo;
+  static OutputSectionBase *ElfHeader;
+  static OutputSectionBase *ProgramHeaders;
+  static OutputSectionBase *PreinitArray;
+  static OutputSectionBase *InitArray;
+  static OutputSectionBase *FiniArray;
 };
 
 template <bool Is64Bits> struct SectionKey {
@@ -785,19 +705,19 @@ template <class ELFT> class OutputSectionFactory {
   typedef typename elf::SectionKey<ELFT::Is64Bits> Key;
 
 public:
-  std::pair<OutputSectionBase<ELFT> *, bool> create(InputSectionBase<ELFT> *C,
-                                                    StringRef OutsecName);
-  std::pair<OutputSectionBase<ELFT> *, bool>
+  std::pair<OutputSectionBase *, bool> create(InputSectionBase<ELFT> *C,
+                                              StringRef OutsecName);
+  std::pair<OutputSectionBase *, bool>
   create(const SectionKey<ELFT::Is64Bits> &Key, InputSectionBase<ELFT> *C);
 
 private:
-  llvm::SmallDenseMap<Key, OutputSectionBase<ELFT> *> Map;
+  llvm::SmallDenseMap<Key, OutputSectionBase *> Map;
 };
 
 template <class ELFT> uint64_t getHeaderSize() {
   if (Config->OFormatBinary)
     return 0;
-  return Out<ELFT>::ElfHeader->getSize() + Out<ELFT>::ProgramHeaders->getSize();
+  return Out<ELFT>::ElfHeader->Size + Out<ELFT>::ProgramHeaders->Size;
 }
 
 template <class ELFT> uint8_t Out<ELFT>::First;
@@ -806,12 +726,11 @@ template <class ELFT> EhFrameHeader<ELFT> *Out<ELFT>::EhFrameHdr;
 template <class ELFT> EhOutputSection<ELFT> *Out<ELFT>::EhFrame;
 template <class ELFT> GdbIndexSection<ELFT> *Out<ELFT>::GdbIndex;
 template <class ELFT> GnuHashTableSection<ELFT> *Out<ELFT>::GnuHashTab;
-template <class ELFT> GotPltSection<ELFT> *Out<ELFT>::GotPlt;
 template <class ELFT> GotSection<ELFT> *Out<ELFT>::Got;
 template <class ELFT> HashTableSection<ELFT> *Out<ELFT>::HashTab;
 template <class ELFT> OutputSection<ELFT> *Out<ELFT>::Bss;
 template <class ELFT> OutputSection<ELFT> *Out<ELFT>::MipsRldMap;
-template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::Opd;
+template <class ELFT> OutputSectionBase *Out<ELFT>::Opd;
 template <class ELFT> uint8_t *Out<ELFT>::OpdBuf;
 template <class ELFT> PltSection<ELFT> *Out<ELFT>::Plt;
 template <class ELFT> RelocationSection<ELFT> *Out<ELFT>::RelaDyn;
@@ -825,12 +744,12 @@ template <class ELFT> VersionDefinitionSection<ELFT> *Out<ELFT>::VerDef;
 template <class ELFT> VersionTableSection<ELFT> *Out<ELFT>::VerSym;
 template <class ELFT> VersionNeedSection<ELFT> *Out<ELFT>::VerNeed;
 template <class ELFT> typename ELFT::Phdr *Out<ELFT>::TlsPhdr;
-template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::DebugInfo;
-template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::ElfHeader;
-template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::ProgramHeaders;
-template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::PreinitArray;
-template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::InitArray;
-template <class ELFT> OutputSectionBase<ELFT> *Out<ELFT>::FiniArray;
+template <class ELFT> OutputSectionBase *Out<ELFT>::DebugInfo;
+template <class ELFT> OutputSectionBase *Out<ELFT>::ElfHeader;
+template <class ELFT> OutputSectionBase *Out<ELFT>::ProgramHeaders;
+template <class ELFT> OutputSectionBase *Out<ELFT>::PreinitArray;
+template <class ELFT> OutputSectionBase *Out<ELFT>::InitArray;
+template <class ELFT> OutputSectionBase *Out<ELFT>::FiniArray;
 } // namespace elf
 } // namespace lld
 

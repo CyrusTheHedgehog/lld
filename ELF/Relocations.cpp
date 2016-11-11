@@ -44,10 +44,11 @@
 #include "Relocations.h"
 #include "Config.h"
 #include "OutputSections.h"
+#include "Strings.h"
 #include "SymbolTable.h"
+#include "SyntheticSections.h"
 #include "Target.h"
 #include "Thunks.h"
-#include "Strings.h"
 
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/raw_ostream.h"
@@ -394,8 +395,8 @@ template <class ELFT> static void addCopyRelSymbol(SharedSymbol<ELFT> *SS) {
     fatal("cannot create a copy relocation for symbol " + SS->getName());
 
   uintX_t Alignment = getAlignment(SS);
-  uintX_t Off = alignTo(Out<ELFT>::Bss->getSize(), Alignment);
-  Out<ELFT>::Bss->setSize(Off + SymSize);
+  uintX_t Off = alignTo(Out<ELFT>::Bss->Size, Alignment);
+  Out<ELFT>::Bss->Size = Off + SymSize;
   Out<ELFT>::Bss->updateAlignment(Alignment);
   uintX_t Shndx = SS->Sym.st_shndx;
   uintX_t Value = SS->Sym.st_value;
@@ -415,16 +416,6 @@ template <class ELFT> static void addCopyRelSymbol(SharedSymbol<ELFT> *SS) {
   }
   Out<ELFT>::RelaDyn->addReloc(
       {Target->CopyRel, Out<ELFT>::Bss, SS->OffsetInBss, false, SS, 0});
-}
-
-template <class ELFT>
-static StringRef getSymbolName(const elf::ObjectFile<ELFT> &File,
-                               SymbolBody &Body) {
-  if (Body.isLocal() && Body.getNameOffset())
-    return File.getStringTable().data() + Body.getNameOffset();
-  if (!Body.isLocal())
-    return Body.getName();
-  return "";
 }
 
 template <class ELFT>
@@ -449,7 +440,7 @@ static RelExpr adjustExpr(const elf::ObjectFile<ELFT> &File, SymbolBody &Body,
   // only memory. We can hack around it if we are producing an executable and
   // the refered symbol can be preemepted to refer to the executable.
   if (Config->Shared || (Config->Pic && !isRelExpr(Expr))) {
-    StringRef Name = getSymbolName(File, Body);
+    StringRef Name = getSymbolName(File.getStringTable(), Body);
     error("can't create dynamic relocation " + getRelName(Type) + " against " +
           (Name.empty() ? "readonly segment" : "symbol " + Name));
     return Expr;
@@ -518,7 +509,7 @@ static typename ELFT::uint computeAddend(const elf::ObjectFile<ELFT> &File,
     if (Expr == R_GOTREL) {
       Addend -= MipsGPOffset;
       if (Body.isLocal())
-        Addend += File.getMipsGp0();
+        Addend += File.MipsGp0;
     }
   }
   if (Config->Pic && Config->EMachine == EM_PPC64 && Type == R_PPC64_TOC)
@@ -539,8 +530,7 @@ static DefinedRegular<ELFT> *getSymbolAt(InputSectionBase<ELFT> *S,
 }
 
 template <class ELFT>
-static std::string getLocation(SymbolBody &Sym, InputSectionBase<ELFT> &S,
-                               typename ELFT::uint Offset) {
+std::string getLocation(InputSectionBase<ELFT> &S, typename ELFT::uint Offset) {
   ObjectFile<ELFT> *File = S.getFile();
 
   // First check if we can get desired values from debugging information.
@@ -548,16 +538,17 @@ static std::string getLocation(SymbolBody &Sym, InputSectionBase<ELFT> &S,
   if (!LineInfo.empty())
     return LineInfo;
 
-  // If don't have STT_FILE typed symbol in object file then
-  // use object file name.
+  // File->SourceFile contains STT_FILE symbol contents which is a
+  // filename. Compilers usually create STT_FILE symbols. If it's
+  // missing, we use an actual filename.
   std::string SrcFile = File->SourceFile;
   if (SrcFile.empty())
-    SrcFile = Sym.File ? getFilename(Sym.File) : getFilename(File);
+    SrcFile = getFilename(File);
 
   // Find a symbol at a given location.
   DefinedRegular<ELFT> *Encl = getSymbolAt(&S, Offset);
   if (Encl && Encl->Type == STT_FUNC) {
-    StringRef Func = getSymbolName(*File, *Encl);
+    StringRef Func = getSymbolName(File->getStringTable(), *Encl);
     return SrcFile + " (function " + maybeDemangle(Func) + ")";
   }
 
@@ -576,7 +567,7 @@ static void reportUndefined(SymbolBody &Sym, InputSectionBase<ELFT> &S,
       Config->UnresolvedSymbols != UnresolvedPolicy::NoUndef)
     return;
 
-  std::string Msg = getLocation(Sym, S, Offset) + ": undefined symbol '" +
+  std::string Msg = getLocation(S, Offset) + ": undefined symbol '" +
                     maybeDemangle(Sym.getName()) + "'";
 
   if (Config->UnresolvedSymbols == UnresolvedPolicy::Warn)
@@ -753,8 +744,8 @@ static void scanRelocs(InputSectionBase<ELFT> &C, ArrayRef<RelTy> Rels) {
       else
         Rel = Target->PltRel;
 
-      Out<ELFT>::GotPlt->addEntry(Body);
-      Out<ELFT>::RelaPlt->addReloc({Rel, Out<ELFT>::GotPlt,
+      In<ELFT>::GotPlt->addEntry(Body);
+      Out<ELFT>::RelaPlt->addReloc({Rel, In<ELFT>::GotPlt,
                                     Body.getGotPltOffset<ELFT>(), !Preemptible,
                                     &Body, 0});
       continue;
@@ -796,14 +787,11 @@ static void scanRelocs(InputSectionBase<ELFT> &C, ArrayRef<RelTy> Rels) {
   }
 }
 
-template <class ELFT>
-void scanRelocations(InputSectionBase<ELFT> &S,
-                     const typename ELFT::Shdr &RelSec) {
-  ELFFile<ELFT> EObj = S.getFile()->getObj();
-  if (RelSec.sh_type == SHT_RELA)
-    scanRelocs(S, check(EObj.relas(&RelSec)));
+template <class ELFT> void scanRelocations(InputSectionBase<ELFT> &S) {
+  if (S.AreRelocsRela)
+    scanRelocs(S, S.relas());
   else
-    scanRelocs(S, check(EObj.rels(&RelSec)));
+    scanRelocs(S, S.rels());
 }
 
 template <class ELFT, class RelTy>
@@ -826,32 +814,30 @@ static void createThunks(InputSectionBase<ELFT> &C, ArrayRef<RelTy> Rels) {
   }
 }
 
-template <class ELFT>
-void createThunks(InputSectionBase<ELFT> &S,
-                  const typename ELFT::Shdr &RelSec) {
-  ELFFile<ELFT> EObj = S.getFile()->getObj();
-  if (RelSec.sh_type == SHT_RELA)
-    createThunks(S, check(EObj.relas(&RelSec)));
+template <class ELFT> void createThunks(InputSectionBase<ELFT> &S) {
+  if (S.AreRelocsRela)
+    createThunks(S, S.relas());
   else
-    createThunks(S, check(EObj.rels(&RelSec)));
+    createThunks(S, S.rels());
 }
 
-template void scanRelocations<ELF32LE>(InputSectionBase<ELF32LE> &,
-                                       const ELF32LE::Shdr &);
-template void scanRelocations<ELF32BE>(InputSectionBase<ELF32BE> &,
-                                       const ELF32BE::Shdr &);
-template void scanRelocations<ELF64LE>(InputSectionBase<ELF64LE> &,
-                                       const ELF64LE::Shdr &);
-template void scanRelocations<ELF64BE>(InputSectionBase<ELF64BE> &,
-                                       const ELF64BE::Shdr &);
+template void scanRelocations<ELF32LE>(InputSectionBase<ELF32LE> &);
+template void scanRelocations<ELF32BE>(InputSectionBase<ELF32BE> &);
+template void scanRelocations<ELF64LE>(InputSectionBase<ELF64LE> &);
+template void scanRelocations<ELF64BE>(InputSectionBase<ELF64BE> &);
 
-template void createThunks<ELF32LE>(InputSectionBase<ELF32LE> &,
-                                    const ELF32LE::Shdr &);
-template void createThunks<ELF32BE>(InputSectionBase<ELF32BE> &,
-                                    const ELF32BE::Shdr &);
-template void createThunks<ELF64LE>(InputSectionBase<ELF64LE> &,
-                                    const ELF64LE::Shdr &);
-template void createThunks<ELF64BE>(InputSectionBase<ELF64BE> &,
-                                    const ELF64BE::Shdr &);
+template void createThunks<ELF32LE>(InputSectionBase<ELF32LE> &);
+template void createThunks<ELF32BE>(InputSectionBase<ELF32BE> &);
+template void createThunks<ELF64LE>(InputSectionBase<ELF64LE> &);
+template void createThunks<ELF64BE>(InputSectionBase<ELF64BE> &);
+
+template std::string getLocation<ELF32LE>(InputSectionBase<ELF32LE> &S,
+                                          uint32_t Offset);
+template std::string getLocation<ELF32BE>(InputSectionBase<ELF32BE> &S,
+                                          uint32_t Offset);
+template std::string getLocation<ELF64LE>(InputSectionBase<ELF64LE> &S,
+                                          uint64_t Offset);
+template std::string getLocation<ELF64BE>(InputSectionBase<ELF64BE> &S,
+                                          uint64_t Offset);
 }
 }

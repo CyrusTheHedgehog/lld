@@ -160,20 +160,11 @@ ArrayRef<SymbolBody *> elf::ObjectFile<ELFT>::getSymbols() {
   return makeArrayRef(this->SymbolBodies).slice(1);
 }
 
-template <class ELFT> uint32_t elf::ObjectFile<ELFT>::getMipsGp0() const {
-  if (ELFT::Is64Bits && MipsOptions && MipsOptions->Reginfo)
-    return MipsOptions->Reginfo->ri_gp_value;
-  if (!ELFT::Is64Bits && MipsReginfo && MipsReginfo->Reginfo)
-    return MipsReginfo->Reginfo->ri_gp_value;
-  return 0;
-}
-
 template <class ELFT>
 void elf::ObjectFile<ELFT>::parse(DenseSet<CachedHashStringRef> &ComdatGroups) {
   // Read section and symbol tables.
-  ArrayRef<Elf_Shdr> ObjSections = check(this->getObj().sections());
-  initializeSections(ComdatGroups, ObjSections);
-  initializeSymbols(ObjSections);
+  initializeSections(ComdatGroups);
+  initializeSymbols();
 }
 
 // Sections with SHT_GROUP and comdat bits define comdat section groups.
@@ -257,8 +248,8 @@ bool elf::ObjectFile<ELFT>::shouldMerge(const Elf_Shdr &Sec) {
 
 template <class ELFT>
 void elf::ObjectFile<ELFT>::initializeSections(
-    DenseSet<CachedHashStringRef> &ComdatGroups,
-    ArrayRef<Elf_Shdr> ObjSections) {
+    DenseSet<CachedHashStringRef> &ComdatGroups) {
+  ArrayRef<Elf_Shdr> ObjSections = check(this->getObj().sections());
   const ELFFile<ELFT> &Obj = this->getObj();
   uint64_t Size = ObjSections.size();
   Sections.resize(Size);
@@ -349,24 +340,6 @@ elf::ObjectFile<ELFT>::createInputSection(const Elf_Shdr &Sec,
     // FIXME: ARM meta-data section. At present attributes are ignored,
     // they can be used to reason about object compatibility.
     return &InputSection<ELFT>::Discarded;
-  case SHT_MIPS_REGINFO:
-    if (MipsReginfo)
-      fatal(getFilename(this) +
-            ": multiple SHT_MIPS_REGINFO sections are not allowed");
-    MipsReginfo.reset(new MipsReginfoInputSection<ELFT>(this, &Sec, Name));
-    return MipsReginfo.get();
-  case SHT_MIPS_OPTIONS:
-    if (MipsOptions)
-      fatal(getFilename(this) +
-            ": multiple SHT_MIPS_OPTIONS sections are not allowed");
-    MipsOptions.reset(new MipsOptionsInputSection<ELFT>(this, &Sec, Name));
-    return MipsOptions.get();
-  case SHT_MIPS_ABIFLAGS:
-    if (MipsAbiFlags)
-      fatal(getFilename(this) +
-            ": multiple SHT_MIPS_ABIFLAGS sections are not allowed");
-    MipsAbiFlags.reset(new MipsAbiFlagsInputSection<ELFT>(this, &Sec, Name));
-    return MipsAbiFlags.get();
   case SHT_RELA:
   case SHT_REL: {
     // This section contains relocation information.
@@ -380,19 +353,28 @@ elf::ObjectFile<ELFT>::createInputSection(const Elf_Shdr &Sec,
     InputSectionBase<ELFT> *Target = getRelocTarget(Sec);
     if (!Target)
       return nullptr;
-    if (auto *S = dyn_cast<InputSection<ELFT>>(Target)) {
-      S->RelocSections.push_back(&Sec);
-      return nullptr;
+    if (Target->FirstRelocation)
+      fatal(getFilename(this) +
+            ": multiple relocation sections to one section are not supported");
+    if (!isa<InputSection<ELFT>>(Target) && !isa<EhInputSection<ELFT>>(Target))
+      fatal(getFilename(this) +
+            ": relocations pointing to SHF_MERGE are not supported");
+
+    size_t NumRelocations;
+    if (Sec.sh_type == SHT_RELA) {
+      ArrayRef<Elf_Rela> Rels = check(this->getObj().relas(&Sec));
+      Target->FirstRelocation = Rels.begin();
+      NumRelocations = Rels.size();
+      Target->AreRelocsRela = true;
+    } else {
+      ArrayRef<Elf_Rel> Rels = check(this->getObj().rels(&Sec));
+      Target->FirstRelocation = Rels.begin();
+      NumRelocations = Rels.size();
+      Target->AreRelocsRela = false;
     }
-    if (auto *S = dyn_cast<EhInputSection<ELFT>>(Target)) {
-      if (S->RelocSection)
-        fatal(getFilename(this) +
-              ": multiple relocation sections to .eh_frame are not supported");
-      S->RelocSection = &Sec;
-      return nullptr;
-    }
-    fatal(getFilename(this) +
-          ": relocations pointing to SHF_MERGE are not supported");
+    assert(isUInt<31>(NumRelocations));
+    Target->NumRelocations = NumRelocations;
+    return nullptr;
   }
   }
 
@@ -422,8 +404,7 @@ elf::ObjectFile<ELFT>::createInputSection(const Elf_Shdr &Sec,
   return make<InputSection<ELFT>>(this, &Sec, Name);
 }
 
-template <class ELFT>
-void elf::ObjectFile<ELFT>::initializeSymbols(ArrayRef<Elf_Shdr> Sections) {
+template <class ELFT> void elf::ObjectFile<ELFT>::initializeSymbols() {
   SymbolBodies.reserve(this->Symbols.size());
   for (const Elf_Sym &Sym : this->Symbols)
     SymbolBodies.push_back(createSymbolBody(&Sym));
@@ -448,7 +429,7 @@ elf::ObjectFile<ELFT>::getSection(const Elf_Sym &Sym) const {
     fatal(getFilename(this) + ": invalid section index: " + Twine(Index));
   }
 
-  if (S == &InputSectionBase<ELFT>::Discarded)
+  if (S == &InputSection<ELFT>::Discarded)
     return S;
   return S->Repl;
 }
@@ -820,15 +801,15 @@ template <class ELFT> void BinaryFile::parse() {
   StringRef SizeName = Saver.save(Twine(Filename) + "_size");
 
   auto *Section =
-      new InputSection<ELFT>(SHF_ALLOC, SHT_PROGBITS, 8, Data, ".data");
+      make<InputSection<ELFT>>(SHF_ALLOC, SHT_PROGBITS, 8, Data, ".data");
   Sections.push_back(Section);
 
-  elf::Symtab<ELFT>::X->addRegular(StartName, STV_DEFAULT, Section, STB_GLOBAL,
-                                   STT_OBJECT, 0);
-  elf::Symtab<ELFT>::X->addRegular(EndName, STV_DEFAULT, Section, STB_GLOBAL,
-                                   STT_OBJECT, Data.size());
-  elf::Symtab<ELFT>::X->addRegular(SizeName, STV_DEFAULT, nullptr, STB_GLOBAL,
-                                   STT_OBJECT, Data.size());
+  elf::Symtab<ELFT>::X->addRegular(StartName, STV_DEFAULT, STT_OBJECT, 0, 0,
+                                   STB_GLOBAL, Section);
+  elf::Symtab<ELFT>::X->addRegular(EndName, STV_DEFAULT, STT_OBJECT,
+                                   Data.size(), 0, STB_GLOBAL, Section);
+  elf::Symtab<ELFT>::X->addRegular(SizeName, STV_DEFAULT, STT_OBJECT,
+                                   Data.size(), 0, STB_GLOBAL, nullptr);
 }
 
 static bool isBitcode(MemoryBufferRef MB) {
@@ -839,7 +820,7 @@ static bool isBitcode(MemoryBufferRef MB) {
 InputFile *elf::createObjectFile(MemoryBufferRef MB, StringRef ArchiveName,
                                  uint64_t OffsetInArchive) {
   InputFile *F =
-      isBitcode(MB) ? new BitcodeFile(MB) : createELFFile<ObjectFile>(MB);
+      isBitcode(MB) ? make<BitcodeFile>(MB) : createELFFile<ObjectFile>(MB);
   F->ArchiveName = ArchiveName;
   F->OffsetInArchive = OffsetInArchive;
   return F;

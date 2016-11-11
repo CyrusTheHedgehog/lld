@@ -64,8 +64,8 @@ ScriptConfiguration *elf::ScriptConfig;
 
 template <class ELFT> static void addRegular(SymbolAssignment *Cmd) {
   uint8_t Visibility = Cmd->Hidden ? STV_HIDDEN : STV_DEFAULT;
-  Symbol *Sym = Symtab<ELFT>::X->addRegular(Cmd->Name, Visibility, nullptr,
-                                            STB_GLOBAL, STT_NOTYPE, 0);
+  Symbol *Sym = Symtab<ELFT>::X->addRegular(Cmd->Name, Visibility, STT_NOTYPE,
+                                            0, 0, STB_GLOBAL, nullptr);
   Cmd->Sym = Sym->body();
 
   // If we have no SECTIONS then we don't have '.' and don't call
@@ -115,10 +115,6 @@ bool AssertCommand::classof(const BaseCommand *C) {
 
 bool BytesDataCommand::classof(const BaseCommand *C) {
   return C->Kind == BytesDataKind;
-}
-
-template <class ELFT> static bool isDiscarded(InputSectionBase<ELFT> *S) {
-  return !S || !S->Live;
 }
 
 template <class ELFT> LinkerScript<ELFT>::LinkerScript() = default;
@@ -195,7 +191,7 @@ void LinkerScript<ELFT>::computeInputSections(InputSectionDescription *I) {
     size_t SizeBefore = I->Sections.size();
 
     for (InputSectionBase<ELFT> *S : Symtab<ELFT>::X->Sections) {
-      if (isDiscarded(S) || S->OutSec)
+      if (!S->Live || S->OutSec)
         continue;
 
       StringRef Filename;
@@ -233,7 +229,7 @@ void LinkerScript<ELFT>::computeInputSections(InputSectionDescription *I) {
   // section for now.
   for (InputSectionData *S : I->Sections) {
     auto *S2 = static_cast<InputSectionBase<ELFT> *>(S);
-    S2->OutSec = (OutputSectionBase<ELFT> *)-1;
+    S2->OutSec = (OutputSectionBase *)-1;
   }
 }
 
@@ -302,7 +298,7 @@ template <class ELFT>
 void LinkerScript<ELFT>::addSection(OutputSectionFactory<ELFT> &Factory,
                                     InputSectionBase<ELFT> *Sec,
                                     StringRef Name) {
-  OutputSectionBase<ELFT> *OutSec;
+  OutputSectionBase *OutSec;
   bool IsNew;
   std::tie(OutSec, IsNew) = Factory.create(createKey(Sec, Name), Sec);
   if (IsNew)
@@ -368,7 +364,7 @@ void LinkerScript<ELFT>::createSections(OutputSectionFactory<ELFT> &Factory) {
 
   // Add orphan sections.
   for (InputSectionBase<ELFT> *S : Symtab<ELFT>::X->Sections)
-    if (!isDiscarded(S) && !S->OutSec)
+    if (S->Live && !S->OutSec)
       addSection(Factory, S, getOutputSectionName(S->Name));
 }
 
@@ -377,39 +373,38 @@ void LinkerScript<ELFT>::createSections(OutputSectionFactory<ELFT> &Factory) {
 // is an offset from beginning of section and regular
 // symbols whose value is absolute.
 template <class ELFT>
-static void assignSectionSymbol(SymbolAssignment *Cmd,
-                                OutputSectionBase<ELFT> *Sec,
+static void assignSectionSymbol(SymbolAssignment *Cmd, OutputSectionBase *Sec,
                                 typename ELFT::uint Value) {
   if (!Cmd->Sym)
     return;
 
   if (auto *Body = dyn_cast<DefinedSynthetic<ELFT>>(Cmd->Sym)) {
     Body->Section = Sec;
-    Body->Value = Cmd->Expression(Value) - Sec->getVA();
+    Body->Value = Cmd->Expression(Value) - Sec->Addr;
     return;
   }
   auto *Body = cast<DefinedRegular<ELFT>>(Cmd->Sym);
   Body->Value = Cmd->Expression(Value);
 }
 
-template <class ELFT> static bool isTbss(OutputSectionBase<ELFT> *Sec) {
-  return (Sec->getFlags() & SHF_TLS) && Sec->getType() == SHT_NOBITS;
+template <class ELFT> static bool isTbss(OutputSectionBase *Sec) {
+  return (Sec->Flags & SHF_TLS) && Sec->Type == SHT_NOBITS;
 }
 
 template <class ELFT> void LinkerScript<ELFT>::output(InputSection<ELFT> *S) {
   if (!AlreadyOutputIS.insert(S).second)
     return;
-  bool IsTbss = isTbss(CurOutSec);
+  bool IsTbss = isTbss<ELFT>(CurOutSec);
 
   uintX_t Pos = IsTbss ? Dot + ThreadBssOffset : Dot;
   Pos = alignTo(Pos, S->Alignment);
-  S->OutSecOff = Pos - CurOutSec->getVA();
+  S->OutSecOff = Pos - CurOutSec->Addr;
   Pos += S->getSize();
 
   // Update output section size after adding each section. This is so that
   // SIZEOF works correctly in the case below:
   // .foo { *(.aaa) a = SIZEOF(.foo); *(.bbb) }
-  CurOutSec->setSize(Pos - CurOutSec->getVA());
+  CurOutSec->Size = Pos - CurOutSec->Addr;
 
   if (IsTbss)
     ThreadBssOffset = Pos - Dot;
@@ -424,12 +419,12 @@ template <class ELFT> void LinkerScript<ELFT>::flush() {
     for (InputSection<ELFT> *I : OutSec->Sections)
       output(I);
   } else {
-    Dot += CurOutSec->getSize();
+    Dot += CurOutSec->Size;
   }
 }
 
 template <class ELFT>
-void LinkerScript<ELFT>::switchTo(OutputSectionBase<ELFT> *Sec) {
+void LinkerScript<ELFT>::switchTo(OutputSectionBase *Sec) {
   if (CurOutSec == Sec)
     return;
   if (AlreadyOutputOS.count(Sec))
@@ -438,8 +433,8 @@ void LinkerScript<ELFT>::switchTo(OutputSectionBase<ELFT> *Sec) {
   flush();
   CurOutSec = Sec;
 
-  Dot = alignTo(Dot, CurOutSec->getAlignment());
-  CurOutSec->setVA(isTbss(CurOutSec) ? Dot + ThreadBssOffset : Dot);
+  Dot = alignTo(Dot, CurOutSec->Addralign);
+  CurOutSec->Addr = isTbss<ELFT>(CurOutSec) ? Dot + ThreadBssOffset : Dot;
 
   // If neither AT nor AT> is specified for an allocatable section, the linker
   // will set the LMA such that the difference between VMA and LMA for the
@@ -454,7 +449,7 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
     if (AssignCmd->Name == ".") {
       // Update to location counter means update to section size.
       Dot = AssignCmd->Expression(Dot);
-      CurOutSec->setSize(Dot - CurOutSec->getVA());
+      CurOutSec->Size = Dot - CurOutSec->Addr;
       return;
     }
     assignSectionSymbol<ELFT>(AssignCmd, CurOutSec, Dot);
@@ -463,9 +458,9 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
 
   // Handle BYTE(), SHORT(), LONG(), or QUAD().
   if (auto *DataCmd = dyn_cast<BytesDataCommand>(&Base)) {
-    DataCmd->Offset = Dot - CurOutSec->getVA();
+    DataCmd->Offset = Dot - CurOutSec->Addr;
     Dot += DataCmd->Size;
-    CurOutSec->setSize(Dot - CurOutSec->getVA());
+    CurOutSec->Size = Dot - CurOutSec->Addr;
     return;
   }
 
@@ -484,11 +479,10 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
 }
 
 template <class ELFT>
-static std::vector<OutputSectionBase<ELFT> *>
-findSections(StringRef Name,
-             const std::vector<OutputSectionBase<ELFT> *> &Sections) {
-  std::vector<OutputSectionBase<ELFT> *> Ret;
-  for (OutputSectionBase<ELFT> *Sec : Sections)
+static std::vector<OutputSectionBase *>
+findSections(StringRef Name, const std::vector<OutputSectionBase *> &Sections) {
+  std::vector<OutputSectionBase *> Ret;
+  for (OutputSectionBase *Sec : Sections)
     if (Sec->getName() == Name)
       Ret.push_back(Sec);
   return Ret;
@@ -498,8 +492,8 @@ template <class ELFT>
 void LinkerScript<ELFT>::assignOffsets(OutputSectionCommand *Cmd) {
   if (Cmd->LMAExpr)
     LMAOffset = Cmd->LMAExpr(Dot) - Dot;
-  std::vector<OutputSectionBase<ELFT> *> Sections =
-      findSections(Cmd->Name, *OutputSections);
+  std::vector<OutputSectionBase *> Sections =
+      findSections<ELFT>(Cmd->Name, *OutputSections);
   if (Sections.empty())
     return;
   switchTo(Sections[0]);
@@ -512,7 +506,7 @@ void LinkerScript<ELFT>::assignOffsets(OutputSectionCommand *Cmd) {
                .base();
   for (auto I = Cmd->Commands.begin(); I != E; ++I)
     process(**I);
-  for (OutputSectionBase<ELFT> *Base : Sections)
+  for (OutputSectionBase *Base : Sections)
     switchTo(Base);
   flush();
   std::for_each(E, Cmd->Commands.end(),
@@ -532,8 +526,8 @@ template <class ELFT> void LinkerScript<ELFT>::adjustSectionsBeforeSorting() {
         auto *Cmd = dyn_cast<OutputSectionCommand>(Base.get());
         if (!Cmd)
           return false;
-        std::vector<OutputSectionBase<ELFT> *> Secs =
-            findSections(Cmd->Name, *OutputSections);
+        std::vector<OutputSectionBase *> Secs =
+            findSections<ELFT>(Cmd->Name, *OutputSections);
         if (!Secs.empty())
           return false;
         for (const std::unique_ptr<BaseCommand> &I : Cmd->Commands)
@@ -553,11 +547,11 @@ template <class ELFT> void LinkerScript<ELFT>::adjustSectionsBeforeSorting() {
     auto *Cmd = dyn_cast<OutputSectionCommand>(Base.get());
     if (!Cmd)
       continue;
-    std::vector<OutputSectionBase<ELFT> *> Secs =
-        findSections(Cmd->Name, *OutputSections);
+    std::vector<OutputSectionBase *> Secs =
+        findSections<ELFT>(Cmd->Name, *OutputSections);
     if (!Secs.empty()) {
-      Flags = Secs[0]->getFlags();
-      Type = Secs[0]->getType();
+      Flags = Secs[0]->Flags;
+      Type = Secs[0]->Type;
       continue;
     }
 
@@ -601,7 +595,7 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
   // This loops creates or moves commands as needed so that they are in the
   // correct order.
   int CmdIndex = 0;
-  for (OutputSectionBase<ELFT> *Sec : *OutputSections) {
+  for (OutputSectionBase *Sec : *OutputSections) {
     StringRef Name = Sec->getName();
 
     // Find the last spot where we can insert a command and still get the
@@ -637,8 +631,8 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
       if (Cmd->Name == ".") {
         Dot = Cmd->Expression(Dot);
       } else if (Cmd->Sym) {
-        assignSectionSymbol(Cmd, CurOutSec ? CurOutSec : (*OutputSections)[0],
-                            Dot);
+        assignSectionSymbol<ELFT>(
+            Cmd, CurOutSec ? CurOutSec : (*OutputSections)[0], Dot);
       }
       continue;
     }
@@ -657,11 +651,11 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
   }
 
   uintX_t MinVA = std::numeric_limits<uintX_t>::max();
-  for (OutputSectionBase<ELFT> *Sec : *OutputSections) {
-    if (Sec->getFlags() & SHF_ALLOC)
-      MinVA = std::min(MinVA, Sec->getVA());
+  for (OutputSectionBase *Sec : *OutputSections) {
+    if (Sec->Flags & SHF_ALLOC)
+      MinVA = std::min<uint64_t>(MinVA, Sec->Addr);
     else
-      Sec->setVA(0);
+      Sec->Addr = 0;
   }
 
   uintX_t HeaderSize = getHeaderSize();
@@ -682,8 +676,8 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
     // ELF and Program headers need to be right before the first section in
     // memory. Set their addresses accordingly.
     MinVA = alignDown(MinVA - HeaderSize, Target->PageSize);
-    Out<ELFT>::ElfHeader->setVA(MinVA);
-    Out<ELFT>::ProgramHeaders->setVA(Out<ELFT>::ElfHeader->getSize() + MinVA);
+    Out<ELFT>::ElfHeader->Addr = MinVA;
+    Out<ELFT>::ProgramHeaders->Addr = Out<ELFT>::ElfHeader->Size + MinVA;
     FirstPTLoad->First = Out<ELFT>::ElfHeader;
     if (!FirstPTLoad->Last)
       FirstPTLoad->Last = Out<ELFT>::ProgramHeaders;
@@ -696,8 +690,8 @@ void LinkerScript<ELFT>::assignAddresses(std::vector<PhdrEntry<ELFT>> &Phdrs) {
     // The code below removes empty PT_LOAD segment and updates
     // program headers size.
     Phdrs.erase(FirstPTLoad);
-    Out<ELFT>::ProgramHeaders->setSize(sizeof(typename ELFT::Phdr) *
-                                       Phdrs.size());
+    Out<ELFT>::ProgramHeaders->Size =
+        sizeof(typename ELFT::Phdr) * Phdrs.size();
   }
 }
 
@@ -734,8 +728,8 @@ std::vector<PhdrEntry<ELFT>> LinkerScript<ELFT>::createPhdrs() {
   }
 
   // Add output sections to program headers.
-  for (OutputSectionBase<ELFT> *Sec : *OutputSections) {
-    if (!(Sec->getFlags() & SHF_ALLOC))
+  for (OutputSectionBase *Sec : *OutputSections) {
+    if (!(Sec->Flags & SHF_ALLOC))
       break;
 
     std::vector<size_t> PhdrIds = getPhdrIndices(Sec->getName());
@@ -835,16 +829,16 @@ template <class ELFT> bool LinkerScript<ELFT>::hasPhdrsCommands() {
 
 template <class ELFT>
 uint64_t LinkerScript<ELFT>::getOutputSectionAddress(StringRef Name) {
-  for (OutputSectionBase<ELFT> *Sec : *OutputSections)
+  for (OutputSectionBase *Sec : *OutputSections)
     if (Sec->getName() == Name)
-      return Sec->getVA();
+      return Sec->Addr;
   error("undefined section " + Name);
   return 0;
 }
 
 template <class ELFT>
 uint64_t LinkerScript<ELFT>::getOutputSectionLMA(StringRef Name) {
-  for (OutputSectionBase<ELFT> *Sec : *OutputSections)
+  for (OutputSectionBase *Sec : *OutputSections)
     if (Sec->getName() == Name)
       return Sec->getLMA();
   error("undefined section " + Name);
@@ -853,18 +847,18 @@ uint64_t LinkerScript<ELFT>::getOutputSectionLMA(StringRef Name) {
 
 template <class ELFT>
 uint64_t LinkerScript<ELFT>::getOutputSectionSize(StringRef Name) {
-  for (OutputSectionBase<ELFT> *Sec : *OutputSections)
+  for (OutputSectionBase *Sec : *OutputSections)
     if (Sec->getName() == Name)
-      return Sec->getSize();
+      return Sec->Size;
   error("undefined section " + Name);
   return 0;
 }
 
 template <class ELFT>
 uint64_t LinkerScript<ELFT>::getOutputSectionAlign(StringRef Name) {
-  for (OutputSectionBase<ELFT> *Sec : *OutputSections)
+  for (OutputSectionBase *Sec : *OutputSections)
     if (Sec->getName() == Name)
-      return Sec->getAlignment();
+      return Sec->Addralign;
   error("undefined section " + Name);
   return 0;
 }

@@ -59,8 +59,7 @@ bool elf::link(ArrayRef<const char *> Args, bool CanExitEarly,
 }
 
 // Parses a linker -m option.
-static std::tuple<ELFKind, uint16_t, uint8_t, bool>
-parseEmulation(StringRef Emul) {
+static std::tuple<ELFKind, uint16_t, uint8_t> parseEmulation(StringRef Emul) {
   uint8_t OSABI = 0;
   StringRef S = Emul;
   if (S.endswith("_fbsd")) {
@@ -92,8 +91,7 @@ parseEmulation(StringRef Emul) {
     else
       error("unknown emulation: " + Emul);
   }
-  bool IsMipsN32ABI = S == "elf32btsmipn32" || S == "elf32ltsmipn32";
-  return std::make_tuple(Ret.first, Ret.second, OSABI, IsMipsN32ABI);
+  return std::make_tuple(Ret.first, Ret.second, OSABI);
 }
 
 // Returns slices of MB by parsing MB as an archive file.
@@ -115,7 +113,7 @@ LinkerDriver::getArchiveMembers(MemoryBufferRef MB) {
     V.push_back(MBRef);
   }
   if (Err)
-    Error(Err);
+    fatal("Archive::children failed: " + toString(std::move(Err)));
 
   // Take ownership of memory buffers created for members of thin archives.
   for (std::unique_ptr<MemoryBuffer> &MB : File->takeThinBuffers())
@@ -449,6 +447,18 @@ static SortSectionPolicy getSortKind(opt::InputArgList &Args) {
   return SortSectionPolicy::Default;
 }
 
+// Parse the --symbol-ordering-file argument. File has form:
+// symbolName1
+// [...]
+// symbolNameN
+static void parseSymbolOrderingList(MemoryBufferRef MB) {
+  unsigned I = 0;
+  SmallVector<StringRef, 0> Arr;
+  MB.getBuffer().split(Arr, '\n');
+  for (StringRef S : Arr)
+    Config->SymbolOrderingFile.insert({CachedHashStringRef(S.trim()), I++});
+}
+
 // Initializes Config members by the command line options.
 void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   for (auto *Arg : Args.filtered(OPT_L))
@@ -463,8 +473,9 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   if (auto *Arg = Args.getLastArg(OPT_m)) {
     // Parse ELF{32,64}{LE,BE} and CPU type.
     StringRef S = Arg->getValue();
-    std::tie(Config->EKind, Config->EMachine, Config->OSABI,
-             Config->MipsN32Abi) = parseEmulation(S);
+    std::tie(Config->EKind, Config->EMachine, Config->OSABI) =
+        parseEmulation(S);
+    Config->MipsN32Abi = (S == "elf32btsmipn32" || S == "elf32ltsmipn32");
     Config->Emulation = S;
   }
 
@@ -580,6 +591,10 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   if (auto *Arg = Args.getLastArg(OPT_dynamic_list))
     if (Optional<MemoryBufferRef> Buffer = readFile(Arg->getValue()))
       parseDynamicList(*Buffer);
+
+  if (auto *Arg = Args.getLastArg(OPT_symbol_ordering_file))
+    if (Optional<MemoryBufferRef> Buffer = readFile(Arg->getValue()))
+      parseSymbolOrderingList(*Buffer);
 
   for (auto *Arg : Args.filtered(OPT_export_dynamic_symbol))
     Config->DynamicList.push_back(Arg->getValue());
@@ -761,7 +776,8 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
   // Aggregate all input sections into one place.
   for (elf::ObjectFile<ELFT> *F : Symtab.getObjectFiles())
     for (InputSectionBase<ELFT> *S : F->getSections())
-      Symtab.Sections.push_back(S);
+      if (S && S != &InputSection<ELFT>::Discarded)
+        Symtab.Sections.push_back(S);
   for (BinaryFile *F : Symtab.getBinaryFiles())
     for (InputSectionData *S : F->getSections())
       Symtab.Sections.push_back(cast<InputSection<ELFT>>(S));
@@ -775,7 +791,7 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
   // MergeInputSection::splitIntoPieces needs to be called before
   // any call of MergeInputSection::getOffset. Do that.
   for (InputSectionBase<ELFT> *S : Symtab.Sections) {
-    if (!S || S == &InputSection<ELFT>::Discarded || !S->Live)
+    if (!S->Live)
       continue;
     if (S->Compressed)
       S->uncompress();

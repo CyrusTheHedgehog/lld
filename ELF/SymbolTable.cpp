@@ -128,8 +128,9 @@ template <class ELFT> void SymbolTable<ELFT>::addCombinedLtoObject() {
 template <class ELFT>
 DefinedRegular<ELFT> *SymbolTable<ELFT>::addAbsolute(StringRef Name,
                                                      uint8_t Visibility) {
-  return cast<DefinedRegular<ELFT>>(
-      addRegular(Name, Visibility, nullptr, STB_GLOBAL, STT_NOTYPE, 0)->body());
+  Symbol *Sym =
+      addRegular(Name, Visibility, STT_NOTYPE, 0, 0, STB_GLOBAL, nullptr);
+  return cast<DefinedRegular<ELFT>>(Sym->body());
 }
 
 // Add Name as an "ignored" symbol. An ignored symbol is a regular
@@ -157,6 +158,7 @@ template <class ELFT> void SymbolTable<ELFT>::wrap(StringRef Name) {
   Symbol *Sym = B->symbol();
   Symbol *Real = addUndefined(Saver.save("__real_" + Name));
   Symbol *Wrap = addUndefined(Saver.save("__wrap_" + Name));
+
   // We rename symbols by replacing the old symbol's SymbolBody with the new
   // symbol's SymbolBody. This causes all SymbolBody pointers referring to the
   // old symbol to instead refer to the new symbol.
@@ -234,7 +236,7 @@ std::pair<Symbol *, bool> SymbolTable<ELFT>::insert(StringRef &Name) {
 // Construct a string in the form of "Sym in File1 and File2".
 // Used to construct an error message.
 static std::string conflictMsg(SymbolBody *Existing, InputFile *NewFile) {
-  return maybeDemangle(Existing->getName()) + " in " +
+  return "'" + maybeDemangle(Existing->getName()) + "' in " +
          getFilename(Existing->File) + " and " + getFilename(NewFile);
 }
 
@@ -257,7 +259,7 @@ SymbolTable<ELFT>::insert(StringRef &Name, uint8_t Type, uint8_t Visibility,
     S->IsUsedInRegularObj = true;
   if (!WasInserted && S->body()->Type != SymbolBody::UnknownType &&
       ((Type == STT_TLS) != S->body()->isTls()))
-    error("TLS attribute mismatch for symbol: " + conflictMsg(S->body(), File));
+    error("TLS attribute mismatch for symbol " + conflictMsg(S->body(), File));
 
   return {S, WasInserted};
 }
@@ -365,14 +367,33 @@ Symbol *SymbolTable<ELFT>::addCommon(StringRef N, uint64_t Size,
   return S;
 }
 
-template <class ELFT>
-void SymbolTable<ELFT>::reportDuplicate(SymbolBody *Existing,
-                                        InputFile *NewFile) {
-  std::string Msg = "duplicate symbol: " + conflictMsg(Existing, NewFile);
+static void print(const Twine &Msg) {
   if (Config->AllowMultipleDefinition)
     warn(Msg);
   else
     error(Msg);
+}
+
+static void reportDuplicate(SymbolBody *Existing, InputFile *NewFile) {
+  print("duplicate symbol " + conflictMsg(Existing, NewFile));
+}
+
+template <class ELFT>
+static void reportDuplicate(SymbolBody *Existing,
+                            InputSectionBase<ELFT> *ErrSec,
+                            typename ELFT::uint ErrOffset) {
+  DefinedRegular<ELFT> *D = dyn_cast<DefinedRegular<ELFT>>(Existing);
+  if (!D || !D->Section || !ErrSec) {
+    reportDuplicate(Existing, ErrSec ? ErrSec->getFile() : nullptr);
+    return;
+  }
+
+  std::string OldLoc = getLocation(*D->Section, D->Value);
+  std::string NewLoc = getLocation(*ErrSec, ErrOffset);
+
+  print(NewLoc + ": duplicate symbol '" + maybeDemangle(Existing->getName()) +
+        "'");
+  print(OldLoc + ": previous definition was here");
 }
 
 template <typename ELFT>
@@ -397,21 +418,12 @@ Symbol *SymbolTable<ELFT>::addRegular(StringRef Name, uint8_t StOther,
     replaceBody<DefinedRegular<ELFT>>(S, Name, StOther, Type, Value, Size,
                                       Section);
   else if (Cmp == 0)
-    reportDuplicate(S->body(), Section->getFile());
+    reportDuplicate(S->body(), Section, Value);
   return S;
 }
 
 template <typename ELFT>
-Symbol *SymbolTable<ELFT>::addRegular(StringRef Name, uint8_t StOther,
-                                      InputSectionBase<ELFT> *Section,
-                                      uint8_t Binding, uint8_t Type,
-                                      uintX_t Value) {
-  return addRegular(Name, StOther, Type, Value, 0, Binding, Section);
-}
-
-template <typename ELFT>
-Symbol *SymbolTable<ELFT>::addSynthetic(StringRef N,
-                                        OutputSectionBase<ELFT> *Section,
+Symbol *SymbolTable<ELFT>::addSynthetic(StringRef N, OutputSectionBase *Section,
                                         uintX_t Value, uint8_t StOther) {
   Symbol *S;
   bool WasInserted;
