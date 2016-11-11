@@ -700,6 +700,27 @@ static uint64_t getImageBase(opt::InputArgList &Args) {
   return V;
 }
 
+// Parses -sda-base options.
+static std::pair<uint64_t, uint64_t> getSdaBases(opt::InputArgList &Args) {
+  // If argument not given or invalid, use ~0 value; triggering
+  // midpoint calculation in the first matching small output section.
+  auto CheckSdaArg = [](opt::Arg *Arg) -> uint64_t {
+    if (Arg) {
+      StringRef S = Arg->getValue();
+      uint64_t V;
+      if (S.getAsInteger(0, V))
+        error(Arg->getOption().getPrefixedName() +
+              ": number expected, but got " + S);
+      else
+        return V;
+    }
+    return ~0;
+  };
+
+  return std::make_pair(CheckSdaArg(Args.getLastArg(OPT_sda_base)),
+                        CheckSdaArg(Args.getLastArg(OPT_sda2_base)));
+}
+
 // Do actual linking. Note that when this function is called,
 // all linker scripts have already been parsed.
 template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
@@ -716,6 +737,7 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
   Config->Mips64EL =
       (Config->EMachine == EM_MIPS && Config->EKind == ELF64LEKind);
   Config->ImageBase = getImageBase(Args);
+  std::tie(Config->SdaBase, Config->Sda2Base) = getSdaBases(Args);
 
   // Default output filename is "a.out" by the Unix tradition.
   if (Config->OutputFile.empty())

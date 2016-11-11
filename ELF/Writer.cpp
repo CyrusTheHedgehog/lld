@@ -606,11 +606,10 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     // be applied in EABI systems, where r13 and r2 are initialized to these
     // linker-generated symbols by the C runtime initialization.
     Symbol *Sym;
-    constexpr OutputSectionBase<ELFT> *NullSec = nullptr;
-    Sym = addOptionalSynthetic("_SDA_BASE_", NullSec, 0);
+    Sym = addOptionalSynthetic<ELFT>("_SDA_BASE_", nullptr, 0);
     if (Sym)
       ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic<ELFT>>(Sym->body());
-    Sym = addOptionalSynthetic("_SDA2_BASE_", NullSec, 0);
+    Sym = addOptionalSynthetic<ELFT>("_SDA2_BASE_", nullptr, 0);
     if (Sym)
       ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic<ELFT>>(Sym->body());
   }
@@ -1364,24 +1363,34 @@ template <class ELFT> void Writer<ELFT>::fixAbsoluteSymbols() {
   if (ElfSym<ELFT>::EhdrStart)
     ElfSym<ELFT>::EhdrStart->Value = Out<ELFT>::ProgramHeaders->Addr;
 
-  auto SectionMidpoint = [](OutputSectionBase<ELFT> *Sec) ->
+  auto SectionMidpoint = [](OutputSectionBase *Sec) ->
   typename ELFT::uint {
-    return ((Sec->getSize() / 2) & ~0x3) + Sec->getVA();
+    return ((Sec->Size / 2) & ~0x3) + Sec->Addr;
   };
 
   // PPC-EABI systems will need the _SDA_BASE_ and _SDA2_BASE_ symbols
   // synthesized for use by C runtime init. The section midpoints are used
-  // to maximize addressing range.
+  // to maximize addressing range. If these values are defined with
+  // -sda-base/-sda2-base options, those are overridden accordingly.
   if (ElfSym<ELFT>::SdaBase) {
-    OutputSectionBase<ELFT> *Sec = findSection(".sdata");
-    if (!Sec) Sec = findSection(".sbss");
-    if (Sec)
-      ElfSym<ELFT>::SdaBase->Value = SectionMidpoint(Sec);
+    if (Config->SdaBase != uint64_t(~0))
+      ElfSym<ELFT>::SdaBase->Value = Config->SdaBase;
+    else {
+      OutputSectionBase *Sec = findSection(".sdata");
+      if (!Sec)
+        Sec = findSection(".sbss");
+      if (Sec)
+        ElfSym<ELFT>::SdaBase->Value = SectionMidpoint(Sec);
+    }
   }
   if (ElfSym<ELFT>::Sda2Base) {
-    OutputSectionBase<ELFT> *Sec = findSection(".sdata2");
-    if (Sec)
-      ElfSym<ELFT>::Sda2Base->Value = SectionMidpoint(Sec);
+    if (Config->Sda2Base != uint64_t(~0))
+      ElfSym<ELFT>::Sda2Base->Value = Config->Sda2Base;
+    else {
+      OutputSectionBase *Sec = findSection(".sdata2");
+      if (Sec)
+        ElfSym<ELFT>::Sda2Base->Value = SectionMidpoint(Sec);
+    }
   }
 
   auto Set = [](DefinedRegular<ELFT> *S1, DefinedRegular<ELFT> *S2, uintX_t V) {

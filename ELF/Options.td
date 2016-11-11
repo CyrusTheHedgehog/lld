@@ -161,6 +161,10 @@ def relocatable: F<"relocatable">, HelpText<"Create relocatable object file">;
 
 def script: S<"script">, HelpText<"Read linker script">;
 
+def sda_base : J<"sda-base=">, HelpText<"Set the small data base address">;
+
+def sda2_base : J<"sda2-base=">, HelpText<"Set the second small data base address">;
+
 def section_start: S<"section-start">, MetaVarName<"<address>">,
   HelpText<"Set address of section">;
 
