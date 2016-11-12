@@ -666,7 +666,8 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
 
   // Read .dol to driver-owned buffer
   Optional<MemoryBufferRef> dolBuffer = readFile(dolArg);
-  if (!dolBuffer.hasValue()) return;
+  if (!dolBuffer.hasValue())
+    return;
   DolFile.emplace(dolBuffer.getValue(), *this);
 
   if (DolFile->getUnusedTextSectionIndex() == -1 ||

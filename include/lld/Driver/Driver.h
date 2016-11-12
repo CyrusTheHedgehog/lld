@@ -27,6 +27,11 @@ namespace mach_o {
 bool link(llvm::ArrayRef<const char *> Args,
           llvm::raw_ostream &Diag = llvm::errs());
 }
+
+namespace hanafuda {
+bool link(llvm::ArrayRef<const char *> Args, bool CanExitEarly,
+          llvm::raw_ostream &Diag = llvm::errs());
+}
 }
 
 #endif

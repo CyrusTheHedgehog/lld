@@ -433,10 +433,9 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
     };
     const DefinedRegular<ELFT> *RelSym = dyn_cast<DefinedRegular<ELFT>>(&Body);
     if (RelSym && RelSym->Section) {
-      const InputSectionBase<ELFT> *Section = RelSym->Section;
-      if (Section->OutSec) {
+      const OutputSectionBase *OutSec = RelSym->Section->OutSec;
+      if (OutSec) {
         // Relocate relative to _SDA_BASE_ or _SDA2_BASE_ synthetic symbols.
-        const OutputSectionBase *OutSec = RelSym->Section->OutSec;
         if (ElfSym<ELFT>::SdaBase &&
             (OutSec->getName() == ".sdata" || OutSec->getName() == ".sbss"))
           return CheckReturn(Body.getVA<ELFT>(A) -
