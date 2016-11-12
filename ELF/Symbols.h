@@ -180,6 +180,13 @@ public:
   uint64_t Size;
 };
 
+enum class HanafudaSecType {
+  None,
+  Text,
+  Data,
+  Bss
+};
+
 // Regular defined symbols read from object file symbol tables.
 template <class ELFT> class DefinedRegular : public Defined {
   typedef typename ELFT::Sym Elf_Sym;
@@ -233,6 +240,10 @@ public:
   // If non-null the symbol has a Thunk that may be used as an alternative
   // destination for callers of this Symbol.
   Thunk<ELFT> *ThunkData = nullptr;
+
+  // Hanafuda additions
+  HanafudaSecType HanafudaType = HanafudaSecType::None;
+  int HanafudaSection;
 
 private:
   static InputSectionBase<ELFT> *NullInputSection;

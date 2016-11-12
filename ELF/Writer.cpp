@@ -181,6 +181,11 @@ template <class ELFT> void Writer<ELFT>::run() {
   openFile();
   if (HasError)
     return;
+  if (Config->OPreWrite) {
+    Config->OPreWrite(Buffer->getBufferStart(), OutputSections);
+    if (HasError)
+      return;
+  }
   if (!Config->OFormatBinary) {
     writeHeader();
     writeSections();
@@ -1280,7 +1285,7 @@ void setOffset(OutputSectionBase *Sec, uintX_t &Off) {
 }
 
 template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary() {
-  uintX_t Off = 0;
+  uintX_t Off = Config->InitialFileOffset;
   for (OutputSectionBase *Sec : OutputSections)
     if (Sec->Flags & SHF_ALLOC)
       setOffset<ELFT>(Sec, Off);
@@ -1289,7 +1294,7 @@ template <class ELFT> void Writer<ELFT>::assignFileOffsetsBinary() {
 
 // Assign file offsets to output sections.
 template <class ELFT> void Writer<ELFT>::assignFileOffsets() {
-  uintX_t Off = 0;
+  uintX_t Off = Config->InitialFileOffset;
   setOffset<ELFT>(Out<ELFT>::ElfHeader, Off);
   setOffset<ELFT>(Out<ELFT>::ProgramHeaders, Off);
 

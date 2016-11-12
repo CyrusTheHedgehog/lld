@@ -8,6 +8,7 @@ add_lld_library(lldELF
   EhFrame.cpp
   Error.cpp
   GdbIndex.cpp
+  HanafudaDriver.cpp
   ICF.cpp
   InputFiles.cpp
   InputSection.cpp

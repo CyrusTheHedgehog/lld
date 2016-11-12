@@ -41,6 +41,7 @@ template <class ELFT> class SymbolTable {
   typedef typename ELFT::uint uintX_t;
 
 public:
+  virtual ~SymbolTable() = default;
   void addFile(InputFile *File);
   void addCombinedLtoObject();
 
@@ -90,6 +91,10 @@ public:
   void wrap(StringRef Name);
 
   std::vector<InputSectionBase<ELFT> *> Sections;
+
+  // Hanafuda additions
+  llvm::StringMap<std::string> HanafudaPatches;
+  virtual bool replaceDefinedSymbolPreTrigger(Symbol *S, StringRef Name) { return false; }
 
 private:
   std::vector<SymbolBody *> findAll(const StringMatcher &M);

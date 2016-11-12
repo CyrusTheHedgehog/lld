@@ -21,6 +21,7 @@ namespace lld {
 namespace elf {
 
 class InputFile;
+class OutputSectionBase;
 struct Symbol;
 
 enum ELFKind {
@@ -153,6 +154,11 @@ struct Configuration {
   unsigned LtoO;
   unsigned Optimize;
   unsigned ThinLtoJobs;
+
+  // Hanafuda additions
+  std::function<void(uint8_t *,
+    const std::vector<OutputSectionBase *>&)> OPreWrite;
+  uint64_t InitialFileOffset = 0;
 };
 
 // The only instance of Configuration struct.
