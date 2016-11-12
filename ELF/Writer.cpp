@@ -606,12 +606,10 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     // be applied in EABI systems, where r13 and r2 are initialized to these
     // linker-generated symbols by the C runtime initialization.
     Symbol *Sym;
-    Sym = addOptionalSynthetic<ELFT>("_SDA_BASE_", nullptr, 0);
-    if (Sym)
-      ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic<ELFT>>(Sym->body());
-    Sym = addOptionalSynthetic<ELFT>("_SDA2_BASE_", nullptr, 0);
-    if (Sym)
-      ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic<ELFT>>(Sym->body());
+    Sym = Symtab<ELFT>::X->addSynthetic("_SDA_BASE_", nullptr, 0, STV_HIDDEN);
+    ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic<ELFT>>(Sym->body());
+    Sym = Symtab<ELFT>::X->addSynthetic("_SDA2_BASE_", nullptr, 0, STV_HIDDEN);
+    ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic<ELFT>>(Sym->body());
   }
 
   // In the assembly for 32 bit x86 the _GLOBAL_OFFSET_TABLE_ symbol
