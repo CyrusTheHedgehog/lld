@@ -36,6 +36,7 @@ public:
 protected:
   std::vector<MemoryBufferRef> getArchiveMembers(MemoryBufferRef MB);
   llvm::Optional<MemoryBufferRef> readFile(StringRef Path);
+  llvm::Optional<MemoryBufferRef> readFileCopyBuf(StringRef Path);
   void readConfigs(llvm::opt::InputArgList &Args);
   void createFiles(llvm::opt::InputArgList &Args);
   void inferMachineType();

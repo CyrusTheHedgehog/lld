@@ -183,6 +183,26 @@ Optional<MemoryBufferRef> LinkerDriver::readFile(StringRef Path) {
   return MBRef;
 }
 
+Optional<MemoryBufferRef> LinkerDriver::readFileCopyBuf(StringRef Path) {
+  if (Config->Verbose)
+    outs() << Path << "\n";
+
+  auto MBOrErr = MemoryBuffer::getFile(Path);
+  if (auto EC = MBOrErr.getError()) {
+    error(EC, "cannot open " + Path);
+    return None;
+  }
+  std::unique_ptr<MemoryBuffer> MB =
+      MemoryBuffer::getMemBufferCopy((*MBOrErr)->getBuffer());
+  MemoryBufferRef MBRef = MB->getMemBufferRef();
+  OwningMBs.push_back(std::move(MB)); // take MB ownership
+
+  if (Cpio)
+    Cpio->append(relativeToRoot(Path), MBRef.getBuffer());
+
+  return MBRef;
+}
+
 // Add a given library by searching it from input search paths.
 void LinkerDriver::addLibrary(StringRef Name) {
   std::string Path = searchLibrary(Name);

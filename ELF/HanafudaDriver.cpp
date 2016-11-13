@@ -43,6 +43,7 @@ using namespace llvm;
 using namespace llvm::ELF;
 using namespace llvm::object;
 using namespace llvm::sys;
+using namespace llvm::support::endian;
 
 using namespace lld;
 using namespace lld::elf;
@@ -129,7 +130,15 @@ private:
   uint32_t Sdata2Base = 0;
   bool DolphinSections = false;
 
-  std::unordered_multimap<uint32_t, uint32_t> OrigCallAddrToInstFileOffs;
+  struct Relocation {
+    uint32_t Addr;
+    uint32_t Offset;
+    uint32_t Type;
+  };
+
+  // {call-target-addr, Relocation}
+  std::unordered_multimap<uint32_t, Relocation>
+      OrigCallAddrToInstFileOffs;
   void scanForRelocations(LinkerDriver &Drv);
 
 public:
@@ -344,8 +353,7 @@ public:
     return nullptr;
   }
 
-  void replaceTargetAddressRelocations(LinkerDriver &Drv,
-                                       uint32_t oldAddr, uint32_t newAddr);
+  void patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr);
 
   void writeTo(uint8_t *BufData) const {
     Header SwappedHead = {};
@@ -442,12 +450,12 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
   MCRegisterInfo &MRI = *Drv.MRI;
   MCInstrInfo &MCII = *Drv.MCII;
 
-  unsigned ppcLR = MRI.getRARegister();
   unsigned ppcR1;
   unsigned ppcR2;
   unsigned ppcR13;
 
   unsigned ppcBL;
+  unsigned ppcBA;
   unsigned ppcLIS;
   unsigned ppcORI;
 
@@ -465,6 +473,8 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
     StringRef name = MCII.getName(i);
     if (name == "BL")
       ppcBL = i;
+    if (name == "BA")
+      ppcBA = i;
     else if (name == "LIS")
       ppcLIS = i;
     else if (name == "ORI")
@@ -520,11 +530,23 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
           }
         }
 
-        if (Desc.isCall() && Desc.hasImplicitDefOfPhysReg(ppcLR)) {
+        // Patch bl calls and absolute jumps
+        if (Desc.getOpcode() == ppcBL) {
           uint32_t Imm = getPPCImmediateOp(Inst);
-          if (Imm != 0xffffffff)
-            OrigCallAddrToInstFileOffs.insert(std::make_pair(Imm, FileIndex));
+          if (Imm != 0xffffffff) {
+            uint32_t Addr = Imm << 2;
+            OrigCallAddrToInstFileOffs.insert(std::make_pair(Addr + VAIndex,
+              Relocation{uint32_t(VAIndex), uint32_t(FileIndex), R_PPC_REL24}));
+          }
+        } else if (Desc.getOpcode() == ppcBA) {
+          uint32_t Imm = getPPCImmediateOp(Inst);
+          if (Imm != 0xffffffff) {
+            uint32_t Addr = Imm << 2;
+            OrigCallAddrToInstFileOffs.insert(std::make_pair(Addr,
+              Relocation{uint32_t(VAIndex), uint32_t(FileIndex), R_PPC_ADDR24}));
+          }
         }
+
         break;
       }
       }
@@ -532,11 +554,25 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
   }
 }
 
-void DOLFile::replaceTargetAddressRelocations(LinkerDriver &Drv,
-                                              uint32_t oldAddr, uint32_t newAddr) {
-  auto range = OrigCallAddrToInstFileOffs.equal_range(oldAddr);
-  for (auto it = range.first; it != range.second; ++it) {
-    it->second;
+void DOLFile::patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr) {
+  for (const std::pair<uint32_t, Relocation> &P :
+       make_range(OrigCallAddrToInstFileOffs.equal_range(oldAddr))) {
+
+    // Make relocation PC-relative if needed
+    int64_t Addr;
+    switch (P.second.Type) {
+    case R_PPC_REL24:
+      Addr = newAddr - int64_t(P.second.Addr);
+      break;
+    default:
+      Addr = newAddr;
+      break;
+    }
+
+    // Perform relocation as normal
+    elf::Target->relocateOne(
+      const_cast<uint8_t *>(MB.getBuffer().bytes_begin() + P.second.Offset),
+        P.second.Type, Addr);
   }
 }
 
@@ -665,7 +701,7 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
   MCE.reset(TheTarget->createMCCodeEmitter(*MCII, *MRI, *Ctx));
 
   // Read .dol to driver-owned buffer
-  Optional<MemoryBufferRef> dolBuffer = readFile(dolArg);
+  Optional<MemoryBufferRef> dolBuffer = readFileCopyBuf(dolArg);
   if (!dolBuffer.hasValue())
     return;
   DolFile.emplace(dolBuffer.getValue(), *this);
@@ -704,27 +740,11 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
   link(Args);
 }
 
-// Override symbol replace trigger to ensure .dol-sourced symbols are patched
-class HanafudaSymbolTable : public SymbolTable<ELF32BE> {
-  LinkerDriver &D;
-  bool replaceDefinedSymbolPreTrigger(Symbol *S, StringRef Name) override {
-    SymbolBody *body = S->body();
-    if (body->isUndefined())
-      return false;
-    if (const auto *DR = dyn_cast<DefinedRegular<ELF32BE>>(body)) {
-      D.DolFile->replaceTargetAddressRelocations(D, DR->Value, 0);
-    }
-    return false;
-  }
-public:
-  HanafudaSymbolTable(LinkerDriver &Din) : D(Din) {}
-};
-
 // Do actual linking. Note that when this function is called,
 // all linker scripts have already been parsed.
 void LinkerDriver::link(opt::InputArgList &Args) {
   // Create symbol table and propogate to user code
-  HanafudaSymbolTable Symtab(*this);
+  SymbolTable<ELF32BE> Symtab;
   elf::Symtab<ELF32BE>::X = &Symtab;
 
   // Load .dol symbol list if provided and populate Symtab
@@ -753,6 +773,33 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   Config->Strip = StripPolicy::All;
   Config->OPreWrite = [&](uint8_t *BufData,
       const std::vector<OutputSectionBase *> &OutputSections) {
+
+    // Patch original calls
+    for (const auto &P : Symtab.HanafudaPatches) {
+      DefinedRegular<ELF32BE> *OldSym =
+          dyn_cast_or_null<DefinedRegular<ELF32BE>>(
+                           Symtab.find(P.first()));
+      if (!OldSym || OldSym->Section) {
+        error("Unable to find original absolute symbol '" +
+              P.first() + "' for patching");
+        continue;
+      }
+
+      DefinedRegular<ELF32BE> *NewSym =
+          dyn_cast_or_null<DefinedRegular<ELF32BE>>(
+                           Symtab.find(P.second));
+      if (!NewSym) {
+        error("Unable to find new symbol '" +
+              P.second + "' for patching");
+        continue;
+      }
+
+      DolFile->patchTargetAddressRelocations(OldSym->Value,
+                                             NewSym->getVA<ELF32BE>(0));
+    }
+    if (HasError)
+      return;
+
     // I'm called after lld has assigned file offsets and VAs to new output sections,
     // and before the file buffer has been committed to disk
     DOLFile::Section *DataSec = nullptr;
