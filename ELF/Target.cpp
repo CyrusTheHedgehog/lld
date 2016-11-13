@@ -972,9 +972,22 @@ void PPCTargetInfo::relocateOne(uint8_t *Loc, uint32_t Type,
   case R_PPC_REL32:
     write32be(Loc, Val);
     break;
-  case R_PPC_REL24:
-    or32be(Loc, Val & 0x3FFFFFC);
+  case R_PPC_ADDR24:
+  case R_PPC_REL24: {
+    uint32_t Inst = read32be(Loc);
+    Inst &= ~0x3FFFFFC;
+    Inst |= Val & 0x3FFFFFC;
+    write32be(Loc, Inst);
     break;
+  }
+  case R_PPC_ADDR14:
+  case R_PPC_REL14: {
+    uint32_t Inst = read32be(Loc);
+    Inst &= ~0xFFFC;
+    Inst |= Val & 0xFFFC;
+    write32be(Loc, Inst);
+    break;
+  }
   case R_PPC_EMB_SDA21: {
     // SDA21 relocation entry is offset one byte into instruction
     uint8_t *InstLoc = Loc - 1;
@@ -993,6 +1006,7 @@ RelExpr PPCTargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
   switch (Type) {
   case R_PPC_REL24:
   case R_PPC_REL32:
+  case R_PPC_REL14:
     return R_PC;
   case R_PPC_EMB_SDA21:
     return R_PPC_SDA;
