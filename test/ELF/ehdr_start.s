@@ -8,4 +8,9 @@
 .text
 .global _start, __ehdr_start
 _start:
-	.quad __ehdr_start
+  .quad __ehdr_start
+
+# RUN: ld.lld -r %t.o -o %t.r
+# RUN: llvm-objdump -t %t.r | FileCheck %s --check-prefix=RELOCATABLE
+
+# RELOCATABLE: 0000000000000000 *UND* 00000000 __ehdr_start

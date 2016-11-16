@@ -356,7 +356,7 @@ RelExpr X86TargetInfo::adjustRelaxExpr(uint32_t Type, const uint8_t *Data,
 }
 
 void X86TargetInfo::writeGotPltHeader(uint8_t *Buf) const {
-  write32le(Buf, Out<ELF32LE>::Dynamic->Addr);
+  write32le(Buf, In<ELF32LE>::Dynamic->getVA());
 }
 
 void X86TargetInfo::writeGotPlt(uint8_t *Buf, const SymbolBody &S) const {
@@ -596,7 +596,7 @@ void X86_64TargetInfo<ELFT>::writeGotPltHeader(uint8_t *Buf) const {
   // required, but it is documented in the psabi and the glibc dynamic linker
   // seems to use it (note that this is relevant for linking ld.so, not any
   // other program).
-  write64le(Buf, Out<ELFT>::Dynamic->Addr);
+  write64le(Buf, In<ELFT>::Dynamic->getVA());
 }
 
 template <class ELFT>
@@ -1045,7 +1045,7 @@ uint64_t getPPC64TocBase() {
   // TOC starts where the first of these sections starts. We always create a
   // .got when we see a relocation that uses it, so for us the start is always
   // the .got.
-  uint64_t TocVA = Out<ELF64BE>::Got->Addr;
+  uint64_t TocVA = In<ELF64BE>::Got->getVA();
 
   // Per the ppc64-elf-linux ABI, The TOC base is TOC value plus 0x8000
   // thus permitting a full 64 Kbytes segment. Note that the glibc startup

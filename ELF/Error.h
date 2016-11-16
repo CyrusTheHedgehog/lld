@@ -41,10 +41,6 @@ void warn(const Twine &Msg);
 void error(const Twine &Msg);
 void error(std::error_code EC, const Twine &Prefix);
 
-template <typename T> void error(const ErrorOr<T> &V, const Twine &Prefix) {
-  error(V.getError(), Prefix);
-}
-
 LLVM_ATTRIBUTE_NORETURN void exitLld(int Val);
 LLVM_ATTRIBUTE_NORETURN void fatal(const Twine &Msg);
 LLVM_ATTRIBUTE_NORETURN void fatal(std::error_code EC, const Twine &Prefix);
@@ -55,10 +51,18 @@ template <class T> T check(ErrorOr<T> E) {
   return std::move(*E);
 }
 
+static inline void check(Error E) {
+  handleAllErrors(std::move(E), [&](llvm::ErrorInfoBase &EIB) -> Error {
+    fatal(EIB.message());
+    return Error::success();
+  });
+}
+
 template <class T> T check(Expected<T> E) {
-  if (!E)
-    fatal(errorToErrorCode(E.takeError()).message());
-  return std::move(*E);
+  if (E)
+    return std::move(*E);
+  check(E.takeError());
+  return T();
 }
 
 template <class T> T check(ErrorOr<T> E, const Twine &Prefix) {
