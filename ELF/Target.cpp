@@ -1009,7 +1009,7 @@ void PPCTargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
   }
   case R_PPC_EMB_SDA21: {
     // SDA21 relocation entry is offset one byte into instruction
-    uint8_t *InstLoc = Loc - 1;
+    uint8_t *InstLoc = Loc - (E == llvm::support::big ? 1 : 0);
     uint32_t Inst = read32<E>(InstLoc) & ~0x1FFFFF;
     Inst |= Val & 0x1FFFFF;
     write32<E>(InstLoc, Inst);

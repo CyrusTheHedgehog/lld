@@ -629,9 +629,10 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
   }
 
   if (Config->EMachine == EM_PPC &&
+      Config->OSABI == ELF::ELFOSABI_STANDALONE &&
       !Config->Shared && !Config->Relocatable) {
-    // In the event a non-relocatable PPC32 target is being built, reserve
-    // Small Data base registers. These will be relocated midway through
+    // In the event a non-relocatable, embedded PPC32 target is being built,
+    // reserve Small Data base registers. These will be relocated midway through
     // the .sdata and .sdata2 sections (if used). This symbol is meant to
     // be applied in EABI systems, where r13 and r2 are initialized to these
     // linker-generated symbols by the C runtime initialization.

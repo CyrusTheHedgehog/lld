@@ -3,16 +3,6 @@
 # RUN: llvm-objdump -disassemble-all %t2 | FileCheck %s
 # REQUIRES: ppc
 
-.sdata2
-smallstr2:
-  .long 0xDEADD00D
-  .long 0xABCDEFAB
-
-# CHECK: Disassembly of section .sdata2:
-# CHECK: smallstr2:
-# CHECK:    100d4:	de ad d0 0d 	stfdu 21, -12275(13)
-# CHECK:    100d8:	ab cd ef ab 	lha 30, -4181(13)
-
 .section .R_PPC_ADDR16_HA,"ax",@progbits
 .globl _start
 _start:
@@ -51,17 +41,6 @@ mystr:
 # CHECK: .FR_PPC_REL24:
 # CHECK:    11014:       48 00 00 04     b .+4
 
-.section .R_PPC_REL32,"ax",@progbits
-.globl .FR_PPC_REL32
-.FR_PPC_REL32:
-  .long .Lfoox3 - .
-.section .R_PPC_REL32_2,"ax",@progbits
-.Lfoox3:
-
-# CHECK: Disassembly of section .R_PPC_REL32:
-# CHECK: .FR_PPC_REL32:
-# CHECK:    11018:       00 00 00 04
-
 .section .R_PPC_ADDR32,"ax",@progbits
 .globl .FR_PPC_ADDR32
 .FR_PPC_ADDR32:
@@ -71,32 +50,37 @@ mystr:
 
 # CHECK: Disassembly of section .R_PPC_ADDR32:
 # CHECK: .FR_PPC_ADDR32:
-# CHECK:    1101c:       00 01 10 20
+# CHECK:    11018:       00 01 10 1c
 
-.section .R_PPC_EMB_SDA21,"ax",@progbits
-  lis 13, _SDA_BASE_@ha
-  ori 13, 13, _SDA_BASE_@l
-  lis 2, _SDA2_BASE_@ha
-  ori 2, 2, _SDA2_BASE_@l
-  lwz 4, smallstr@sdarx(0)
-  lwz 5, smallstr2@sdarx(0)
+.section .R_PPC_REL32,"ax",@progbits
+.globl .FR_PPC_REL32
+.FR_PPC_REL32:
+  .long .Lfoox3 - .
+.section .R_PPC_REL32_2,"ax",@progbits
+.Lfoox3:
 
-# CHECK: Disassembly of section .R_PPC_EMB_SDA21:
-# CHECK: .R_PPC_EMB_SDA21:
-# CHECK: 11020:	3d a0 00 01 	lis 13, 1
-# CHECK: 11024:	61 ad 20 04 	ori 13, 13, 8196
-# CHECK: 11028:	3c 40 00 01 	lis 2, 1
-# CHECK: 1102c:	60 42 00 d8 	ori 2, 2, 216
-# CHECK: 11030:	80 8d 00 00 	lwz 4, 0(13)
-# CHECK: 11034:	80 a2 ff fc 	lwz 5, -4(2)
+# CHECK: Disassembly of section .R_PPC_REL32:
+# CHECK: .FR_PPC_REL32:
+# CHECK:    1101c:       00 00 00 04
 
-.sdata
-  .long 0xABCDEFAB
-smallstr:
-  .long 0xDEADBEEF
+.section .R_PPC_ADDR14,"ax",@progbits
+.globl .FR_PPC_ADDR14
+.FR_PPC_ADDR14:
+  beqa .Lfoox4
+.section .R_PPC_ADDR14_2,"ax",@progbits
+.Lfoox4:
 
-# CHECK: Disassembly of section .sdata:
-# CHECK: .sdata:
-# CHECK:    12000:	ab cd ef ab 	lha 30, -4181(13)
-# CHECK: smallstr:
-# CHECK:    12004:	de ad be ef 	stfdu 21, -16657(13)
+# CHECK: Disassembly of section .R_PPC_ADDR14:
+# CHECK: .FR_PPC_ADDR14:
+# CHECK:    11020:       41 82 10 26     bta 2, 4132
+
+.section .R_PPC_REL14,"ax",@progbits
+.globl .FR_PPC_REL14
+.FR_PPC_REL14:
+  beq .Lfoox5
+.section .R_PPC_REL14_2,"ax",@progbits
+.Lfoox5:
+
+# CHECK: Disassembly of section .R_PPC_REL14:
+# CHECK: .FR_PPC_REL14:
+# CHECK:    11024:       41 82 00 04     bt 2, .+4
