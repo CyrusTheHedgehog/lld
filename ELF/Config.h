@@ -147,8 +147,8 @@ struct Configuration {
   uint64_t EntryAddr = 0;
   uint64_t ImageBase;
   uint64_t MaxPageSize;
-  uint64_t SdaBase;
-  uint64_t Sda2Base;
+  uint64_t SdaBase = ~0;
+  uint64_t Sda2Base = ~0;
   uint64_t ZStackSize;
   unsigned LtoPartitions;
   unsigned LtoO;
