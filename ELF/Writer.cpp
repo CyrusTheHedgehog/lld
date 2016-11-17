@@ -618,7 +618,8 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     addOptionalRegular("__gnu_local_gp", In<ELFT>::Got, MipsGPOffset);
   }
 
-  if (Config->EMachine == EM_PPC && !Config->Relocatable) {
+  if (Config->EMachine == EM_PPC &&
+      !Config->Shared && !Config->Relocatable) {
     // In the event a non-relocatable PPC32 target is being built, reserve
     // Small Data base registers. These will be relocated midway through
     // the .sdata and .sdata2 sections (if used). This symbol is meant to
