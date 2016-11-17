@@ -105,6 +105,7 @@ public:
 };
 
 StringRef getRelName(uint32_t Type);
+template <class ELFT>
 uint64_t getPPC64TocBase();
 
 const unsigned MipsGPOffset = 0x7ff0;

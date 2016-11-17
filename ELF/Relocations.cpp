@@ -518,7 +518,7 @@ static typename ELFT::uint computeAddend(const elf::ObjectFile<ELFT> &File,
       Addend += File.MipsGp0;
   }
   if (Config->Pic && Config->EMachine == EM_PPC64 && Type == R_PPC64_TOC)
-    Addend += getPPC64TocBase();
+    Addend += getPPC64TocBase<ELFT>();
   return Addend;
 }
 

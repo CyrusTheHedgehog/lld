@@ -315,7 +315,7 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
   case R_THUNK_PLT_PC:
     return Body.getThunkVA<ELFT>() + A - P;
   case R_PPC_TOC:
-    return getPPC64TocBase() + A;
+    return getPPC64TocBase<ELFT>() + A;
   case R_TLSGD:
     return In<ELFT>::Got->getGlobalDynOffset(Body) + A -
            In<ELFT>::Got->getSize();
