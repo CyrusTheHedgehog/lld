@@ -59,9 +59,9 @@ struct SymbolVersion {
 // This struct contains symbols version definition that
 // can be found in version script if it is used for link.
 struct VersionDefinition {
-  VersionDefinition(llvm::StringRef Name, size_t Id) : Name(Name), Id(Id) {}
+  VersionDefinition(llvm::StringRef Name, uint16_t Id) : Name(Name), Id(Id) {}
   llvm::StringRef Name;
-  size_t Id;
+  uint16_t Id;
   std::vector<SymbolVersion> Globals;
   size_t NameOff; // Offset in string table.
 };
@@ -92,6 +92,7 @@ struct Configuration {
   std::vector<llvm::StringRef> SearchPaths;
   std::vector<llvm::StringRef> Undefined;
   std::vector<SymbolVersion> VersionScriptGlobals;
+  std::vector<SymbolVersion> VersionScriptLocals;
   std::vector<uint8_t> BuildIdVector;
   bool AllowMultipleDefinition;
   bool AsNeeded = false;
@@ -147,8 +148,8 @@ struct Configuration {
   uint64_t EntryAddr = 0;
   uint64_t ImageBase;
   uint64_t MaxPageSize;
-  uint64_t SdaBase;
-  uint64_t Sda2Base;
+  uint64_t SdaBase = ~0;
+  uint64_t Sda2Base = ~0;
   uint64_t ZStackSize;
   unsigned LtoPartitions;
   unsigned LtoO;

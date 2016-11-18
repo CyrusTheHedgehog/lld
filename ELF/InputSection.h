@@ -66,9 +66,6 @@ public:
     return llvm::makeArrayRef<T>((const T *)Data.data(), S / sizeof(T));
   }
 
-  // If a section is compressed, this has the uncompressed section data.
-  std::unique_ptr<uint8_t[]> UncompressedData;
-
   std::vector<Relocation> Relocations;
 };
 
@@ -235,7 +232,6 @@ public:
   // Splittable sections are handled as a sequence of data
   // rather than a single large blob of data.
   std::vector<EhSectionPiece> Pieces;
-
 };
 
 // This corresponds to a non SHF_MERGE section of an input file.

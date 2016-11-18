@@ -98,7 +98,8 @@ StringRef elf::getOutputSectionName(StringRef Name) {
   for (StringRef V :
        {".text.", ".rodata.", ".data.rel.ro.", ".data.", ".bss.",
         ".init_array.", ".fini_array.", ".ctors.", ".dtors.", ".tbss.",
-        ".gcc_except_table.", ".tdata.", ".ARM.exidx."}) {
+        ".sdata.", ".sdata2.", ".sbss.", ".gcc_except_table.",
+        ".tdata.", ".ARM.exidx."}) {
     StringRef Prefix = V.drop_back();
     if (Name.startswith(V) || Name == Prefix)
       return Prefix;
@@ -129,14 +130,14 @@ template <class ELFT> static bool needsInterpSection() {
          !Script<ELFT>::X->ignoreInterpSection();
 }
 
-template <class ELFT> void elf::writeResult() {
-  Writer<ELFT>().run();
-}
+template <class ELFT> void elf::writeResult() { Writer<ELFT>().run(); }
 
 // The main function of the writer.
 template <class ELFT> void Writer<ELFT>::run() {
   createSyntheticSections();
-  addReservedSymbols();
+
+  if (!Config->Relocatable)
+    addReservedSymbols();
 
   if (Target->NeedsThunks)
     forEachRelSec(createThunks<ELFT>);
@@ -214,14 +215,13 @@ template <class ELFT> void Writer<ELFT>::createSyntheticSections() {
   // Create singleton output sections.
   Out<ELFT>::Bss =
       make<OutputSection<ELFT>>(".bss", SHT_NOBITS, SHF_ALLOC | SHF_WRITE);
-  Out<ELFT>::DynStrTab = make<StringTableSection<ELFT>>(".dynstr", true);
-  Out<ELFT>::Dynamic = make<DynamicSection<ELFT>>();
+  In<ELFT>::DynStrTab = make<StringTableSection<ELFT>>(".dynstr", true);
+  In<ELFT>::Dynamic = make<DynamicSection<ELFT>>();
   Out<ELFT>::EhFrame = make<EhOutputSection<ELFT>>();
-  Out<ELFT>::Got = make<GotSection<ELFT>>();
   Out<ELFT>::Plt = make<PltSection<ELFT>>();
-  Out<ELFT>::RelaDyn = make<RelocationSection<ELFT>>(
+  In<ELFT>::RelaDyn = make<RelocationSection<ELFT>>(
       Config->Rela ? ".rela.dyn" : ".rel.dyn", Config->ZCombreloc);
-  Out<ELFT>::ShStrTab = make<StringTableSection<ELFT>>(".shstrtab", false);
+  In<ELFT>::ShStrTab = make<StringTableSection<ELFT>>(".shstrtab", false);
   Out<ELFT>::VerSym = make<VersionTableSection<ELFT>>();
   Out<ELFT>::VerNeed = make<VersionNeedSection<ELFT>>();
 
@@ -238,8 +238,7 @@ template <class ELFT> void Writer<ELFT>::createSyntheticSections() {
   }
 
   if (!Symtab<ELFT>::X->getSharedFiles().empty() || Config->Pic) {
-    Out<ELFT>::DynSymTab =
-        make<SymbolTableSection<ELFT>>(*Out<ELFT>::DynStrTab);
+    In<ELFT>::DynSymTab = make<SymbolTableSection<ELFT>>(*In<ELFT>::DynStrTab);
   }
 
   if (Config->EhFrameHdr)
@@ -252,11 +251,11 @@ template <class ELFT> void Writer<ELFT>::createSyntheticSections() {
   if (Config->GdbIndex)
     Out<ELFT>::GdbIndex = make<GdbIndexSection<ELFT>>();
 
-  Out<ELFT>::RelaPlt = make<RelocationSection<ELFT>>(
+  In<ELFT>::RelaPlt = make<RelocationSection<ELFT>>(
       Config->Rela ? ".rela.plt" : ".rel.plt", false /*Sort*/);
   if (Config->Strip != StripPolicy::All) {
-    Out<ELFT>::StrTab = make<StringTableSection<ELFT>>(".strtab", false);
-    Out<ELFT>::SymTab = make<SymbolTableSection<ELFT>>(*Out<ELFT>::StrTab);
+    In<ELFT>::StrTab = make<StringTableSection<ELFT>>(".strtab", false);
+    In<ELFT>::SymTab = make<SymbolTableSection<ELFT>>(*In<ELFT>::StrTab);
   }
 
   if (Config->EMachine == EM_MIPS && !Config->Shared) {
@@ -273,7 +272,8 @@ template <class ELFT> void Writer<ELFT>::createSyntheticSections() {
     Out<ELFT>::VerDef = make<VersionDefinitionSection<ELFT>>();
 
   // Initialize linker generated sections
-  Symtab<ELFT>::X->Sections.push_back(createCommentSection<ELFT>());
+  if (!Config->Relocatable)
+    Symtab<ELFT>::X->Sections.push_back(createCommentSection<ELFT>());
 
   if (Config->BuildId == BuildIdKind::Fast)
     In<ELFT>::BuildId = make<BuildIdFastHash<ELFT>>();
@@ -317,6 +317,11 @@ template <class ELFT> void Writer<ELFT>::createSyntheticSections() {
       Symtab<ELFT>::X->Sections.push_back(RegSec);
     }
   }
+
+  if (Config->EMachine == EM_MIPS)
+    In<ELFT>::MipsGot = make<MipsGotSection<ELFT>>();
+  else
+    In<ELFT>::Got = make<GotSection<ELFT>>();
 
   In<ELFT>::GotPlt = make<GotPltSection<ELFT>>();
 }
@@ -373,7 +378,7 @@ template <class ELFT> static bool includeInSymtab(const SymbolBody &B) {
 // Local symbols are not in the linker's symbol table. This function scans
 // each object file's symbol table to copy local symbols to the output.
 template <class ELFT> void Writer<ELFT>::copyLocalSymbols() {
-  if (!Out<ELFT>::SymTab)
+  if (!In<ELFT>::SymTab)
     return;
   for (elf::ObjectFile<ELFT> *F : Symtab<ELFT>::X->getObjectFiles()) {
     StringRef StrTab = F->getStringTable();
@@ -393,11 +398,11 @@ template <class ELFT> void Writer<ELFT>::copyLocalSymbols() {
       InputSectionBase<ELFT> *Sec = DR->Section;
       if (!shouldKeepInSymtab<ELFT>(Sec, SymName, *B))
         continue;
-      ++Out<ELFT>::SymTab->NumLocals;
+      ++In<ELFT>::SymTab->NumLocals;
       if (Config->Relocatable)
-        B->DynsymIndex = Out<ELFT>::SymTab->NumLocals;
+        B->DynsymIndex = In<ELFT>::SymTab->NumLocals;
       F->KeptLocalSyms.push_back(
-          std::make_pair(DR, Out<ELFT>::SymTab->StrTabSec.addString(SymName)));
+          std::make_pair(DR, In<ELFT>::SymTab->StrTabSec.addString(SymName)));
     }
   }
 }
@@ -432,7 +437,11 @@ template <class ELFT> bool elf::isRelroSection(const OutputSectionBase *Sec) {
     return true;
   if (Sec == In<ELFT>::GotPlt->OutSec)
     return Config->ZNow;
-  if (Sec == Out<ELFT>::Dynamic || Sec == Out<ELFT>::Got)
+  if (Sec == In<ELFT>::Dynamic->OutSec)
+    return true;
+  if (In<ELFT>::Got && Sec == In<ELFT>::Got->OutSec)
+    return true;
+  if (In<ELFT>::MipsGot && Sec == In<ELFT>::MipsGot->OutSec)
     return true;
   StringRef S = Sec->getName();
   return S == ".data.rel.ro" || S == ".ctors" || S == ".dtors" || S == ".jcr" ||
@@ -562,6 +571,27 @@ static Symbol *addOptionalSynthetic(StringRef Name, OutputSectionBase *Sec,
   return Symtab<ELFT>::X->addSynthetic(Name, Sec, Val, StOther);
 }
 
+template <class ELFT>
+static Symbol *addRegular(StringRef Name, InputSectionBase<ELFT> *IS,
+                          typename ELFT::uint Value) {
+  typename ELFT::Sym LocalHidden = {};
+  LocalHidden.setBindingAndType(STB_LOCAL, STT_NOTYPE);
+  LocalHidden.setVisibility(STV_HIDDEN);
+  LocalHidden.st_value = Value;
+  return Symtab<ELFT>::X->addRegular(Name, LocalHidden, IS, nullptr);
+}
+
+template <class ELFT>
+static Symbol *addOptionalRegular(StringRef Name, InputSectionBase<ELFT> *IS,
+                                  typename ELFT::uint Value) {
+  SymbolBody *S = Symtab<ELFT>::X->find(Name);
+  if (!S)
+    return nullptr;
+  if (!S->isUndefined() && !S->isShared())
+    return S->symbol();
+  return addRegular(Name, IS, Value);
+}
+
 // The beginning and the ending of .rel[a].plt section are marked
 // with __rel[a]_iplt_{start,end} symbols if it is a statically linked
 // executable. The runtime needs these symbols in order to resolve
@@ -569,31 +599,29 @@ static Symbol *addOptionalSynthetic(StringRef Name, OutputSectionBase *Sec,
 // need these symbols, since IRELATIVE relocs are resolved through GOT
 // and PLT. For details, see http://www.airs.com/blog/archives/403.
 template <class ELFT> void Writer<ELFT>::addRelIpltSymbols() {
-  if (Out<ELFT>::DynSymTab || !Out<ELFT>::RelaPlt)
+  if (In<ELFT>::DynSymTab)
     return;
   StringRef S = Config->Rela ? "__rela_iplt_start" : "__rel_iplt_start";
-  addOptionalSynthetic<ELFT>(S, Out<ELFT>::RelaPlt, 0);
+  addOptionalRegular<ELFT>(S, In<ELFT>::RelaPlt, 0);
 
   S = Config->Rela ? "__rela_iplt_end" : "__rel_iplt_end";
-  addOptionalSynthetic<ELFT>(S, Out<ELFT>::RelaPlt,
-                             DefinedSynthetic<ELFT>::SectionEnd);
+  addOptionalRegular<ELFT>(S, In<ELFT>::RelaPlt, -1);
 }
 
 // The linker is expected to define some symbols depending on
 // the linking result. This function defines such symbols.
 template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
-  if (Config->EMachine == EM_MIPS && !Config->Relocatable) {
+  if (Config->EMachine == EM_MIPS) {
     // Define _gp for MIPS. st_value of _gp symbol will be updated by Writer
     // so that it points to an absolute address which is relative to GOT.
     // See "Global Data Symbols" in Chapter 6 in the following document:
     // ftp://www.linux-mips.org/pub/linux/mips/doc/ABI/mipsabi.pdf
-    Symtab<ELFT>::X->addSynthetic("_gp", Out<ELFT>::Got, MipsGPOffset,
-                                  STV_HIDDEN);
+    addRegular("_gp", In<ELFT>::MipsGot, MipsGPOffset);
 
     // On MIPS O32 ABI, _gp_disp is a magic symbol designates offset between
     // start of function and 'gp' pointer into GOT.
     Symbol *Sym =
-        addOptionalSynthetic<ELFT>("_gp_disp", Out<ELFT>::Got, MipsGPOffset);
+        addOptionalRegular("_gp_disp", In<ELFT>::MipsGot, MipsGPOffset);
     if (Sym)
       ElfSym<ELFT>::MipsGpDisp = Sym->body();
 
@@ -601,12 +629,14 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     // pointer. This symbol is used in the code generated by .cpload pseudo-op
     // in case of using -mno-shared option.
     // https://sourceware.org/ml/binutils/2004-12/msg00094.html
-    addOptionalSynthetic<ELFT>("__gnu_local_gp", Out<ELFT>::Got, MipsGPOffset);
+    addOptionalRegular("__gnu_local_gp", In<ELFT>::MipsGot, MipsGPOffset);
   }
 
-  if (Config->EMachine == EM_PPC && !Config->Relocatable) {
-    // In the event a non-relocatable PPC32 target is being built, reserve
-    // Small Data base registers. These will be relocated midway through
+  if (Config->EMachine == EM_PPC &&
+      Config->OSABI == ELF::ELFOSABI_STANDALONE &&
+      !Config->Shared && !Config->Relocatable) {
+    // In the event a non-relocatable, embedded PPC32 target is being built,
+    // reserve Small Data base registers. These will be relocated midway through
     // the .sdata and .sdata2 sections (if used). This symbol is meant to
     // be applied in EABI systems, where r13 and r2 are initialized to these
     // linker-generated symbols by the C runtime initialization.
@@ -629,8 +659,7 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
   // an undefined symbol in the .o files.
   // Given that the symbol is effectively unused, we just create a dummy
   // hidden one to avoid the undefined symbol error.
-  if (!Config->Relocatable)
-    Symtab<ELFT>::X->addIgnored("_GLOBAL_OFFSET_TABLE_");
+  Symtab<ELFT>::X->addIgnored("_GLOBAL_OFFSET_TABLE_");
 
   // __tls_get_addr is defined by the dynamic linker for dynamic ELFs. For
   // static linking the linker is required to optimize away any references to
@@ -638,7 +667,7 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
   // to avoid the undefined symbol error. As usual special cases are ARM and
   // MIPS - the libc for these targets defines __tls_get_addr itself because
   // there are no TLS optimizations for these targets.
-  if (!Out<ELFT>::DynSymTab &&
+  if (!In<ELFT>::DynSymTab &&
       (Config->EMachine != EM_MIPS && Config->EMachine != EM_ARM))
     Symtab<ELFT>::X->addIgnored("__tls_get_addr");
 
@@ -731,6 +760,9 @@ void Writer<ELFT>::forEachRelSec(
 
 template <class ELFT>
 void Writer<ELFT>::addInputSec(InputSectionBase<ELFT> *IS) {
+  if (!IS)
+    return;
+
   if (!IS->Live) {
     reportDiscarded(IS);
     return;
@@ -775,6 +807,10 @@ static bool canSharePtLoad(const OutputSectionBase &S1,
 }
 
 template <class ELFT> void Writer<ELFT>::sortSections() {
+  // Don't sort if using -r. It is not necessary and we want to preserve the
+  // relative order for SHF_LINK_ORDER sections.
+  if (Config->Relocatable)
+    return;
   if (!ScriptConfig->HasSections) {
     std::stable_sort(OutputSections.begin(), OutputSections.end(),
                      compareSectionsNonScript<ELFT>);
@@ -842,6 +878,19 @@ template <class ELFT> void Writer<ELFT>::sortSections() {
     std::rotate(BestPos, NonScriptI, NonScriptI + 1);
     ++NonScriptI;
   }
+
+  Script<ELFT>::X->adjustSectionsAfterSorting();
+}
+
+template <class ELFT>
+static void
+finalizeSynthetic(const std::vector<SyntheticSection<ELFT> *> &Sections) {
+  for (SyntheticSection<ELFT> *SS : Sections)
+    if (SS && SS->OutSec) {
+      SS->finalize();
+      SS->OutSec->Size = 0;
+      SS->OutSec->assignOffsets();
+    }
 }
 
 // Create output section objects and add them to OutputSections.
@@ -864,9 +913,8 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
   // It should be okay as no one seems to care about the type.
   // Even the author of gold doesn't remember why gold behaves that way.
   // https://sourceware.org/ml/binutils/2002-03/msg00360.html
-  if (Out<ELFT>::DynSymTab)
-    Symtab<ELFT>::X->addSynthetic("_DYNAMIC", Out<ELFT>::Dynamic, 0,
-                                  STV_HIDDEN);
+  if (In<ELFT>::DynSymTab)
+    addRegular("_DYNAMIC", In<ELFT>::Dynamic, 0);
 
   // Define __rel[a]_iplt_{start,end} symbols if needed.
   addRelIpltSymbols();
@@ -887,11 +935,11 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
 
     if (!includeInSymtab<ELFT>(*Body))
       continue;
-    if (Out<ELFT>::SymTab)
-      Out<ELFT>::SymTab->addSymbol(Body);
+    if (In<ELFT>::SymTab)
+      In<ELFT>::SymTab->addSymbol(Body);
 
-    if (Out<ELFT>::DynSymTab && S->includeInDynsym()) {
-      Out<ELFT>::DynSymTab->addSymbol(Body);
+    if (In<ELFT>::DynSymTab && S->includeInDynsym()) {
+      In<ELFT>::DynSymTab->addSymbol(Body);
       if (auto *SS = dyn_cast<SharedSymbol<ELFT>>(Body))
         if (SS->file()->isNeeded())
           Out<ELFT>::VerNeed->addSymbol(SS);
@@ -906,35 +954,31 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
   // This function adds linker-created Out<ELFT>::* sections.
   addPredefinedSections();
 
-  // We fill .got.plt section in scanRelocs(). This is the
-  // reason we don't add it earlier in createSections().
-  if (!In<ELFT>::GotPlt->empty()) {
-    addInputSec(In<ELFT>::GotPlt);
-    In<ELFT>::GotPlt->OutSec->assignOffsets();
-  }
-
   sortSections();
 
   unsigned I = 1;
   for (OutputSectionBase *Sec : OutputSections) {
     Sec->SectionIndex = I++;
-    Sec->ShName = Out<ELFT>::ShStrTab->addString(Sec->getName());
+    Sec->ShName = In<ELFT>::ShStrTab->addString(Sec->getName());
   }
 
+  // FIXME: this should be removed after converting GnuHashTableSection
+  // to input section.
   // Finalizers fix each section's size.
   // .dynsym is finalized early since that may fill up .gnu.hash.
-  if (Out<ELFT>::DynSymTab)
-    Out<ELFT>::DynSymTab->finalize();
+  finalizeSynthetic<ELFT>({In<ELFT>::DynSymTab});
 
   // Fill other section headers. The dynamic table is finalized
   // at the end because some tags like RELSZ depend on result
   // of finalizing other sections.
   for (OutputSectionBase *Sec : OutputSections)
-    if (Sec != Out<ELFT>::Dynamic)
-      Sec->finalize();
+    Sec->finalize();
 
-  if (Out<ELFT>::DynSymTab)
-    Out<ELFT>::Dynamic->finalize();
+  // Dynamic section must be the last one in this list.
+  finalizeSynthetic<ELFT>(
+      {In<ELFT>::SymTab, In<ELFT>::ShStrTab, In<ELFT>::StrTab,
+       In<ELFT>::DynStrTab, In<ELFT>::Got, In<ELFT>::MipsGot, In<ELFT>::GotPlt,
+       In<ELFT>::RelaDyn, In<ELFT>::RelaPlt, In<ELFT>::Dynamic});
 
   // Now that all output offsets are fixed. Finalize mergeable sections
   // to fix their maps from input offsets to output offsets.
@@ -943,17 +987,17 @@ template <class ELFT> void Writer<ELFT>::finalizeSections() {
 }
 
 template <class ELFT> bool Writer<ELFT>::needsGot() {
-  if (!Out<ELFT>::Got->empty())
-    return true;
-
   // We add the .got section to the result for dynamic MIPS target because
   // its address and properties are mentioned in the .dynamic section.
-  if (Config->EMachine == EM_MIPS && !Config->Relocatable)
+  if (Config->EMachine == EM_MIPS)
+    return !Config->Relocatable;
+
+  if (!In<ELFT>::Got->empty())
     return true;
 
   // If we have a relocation that is relative to GOT (such as GOTOFFREL),
   // we need to emit a GOT even if it's empty.
-  return Out<ELFT>::Got->HasGotOffRel;
+  return In<ELFT>::Got->HasGotOffRel;
 }
 
 // This function add Out<ELFT>::* sections to OutputSections.
@@ -967,11 +1011,11 @@ template <class ELFT> void Writer<ELFT>::addPredefinedSections() {
   // because we sort the sections using their attributes below.
   if (Out<ELFT>::GdbIndex && Out<ELFT>::DebugInfo)
     Add(Out<ELFT>::GdbIndex);
-  Add(Out<ELFT>::SymTab);
-  Add(Out<ELFT>::ShStrTab);
-  Add(Out<ELFT>::StrTab);
-  if (Out<ELFT>::DynSymTab) {
-    Add(Out<ELFT>::DynSymTab);
+  addInputSec(In<ELFT>::SymTab);
+  addInputSec(In<ELFT>::ShStrTab);
+  addInputSec(In<ELFT>::StrTab);
+  if (In<ELFT>::DynSymTab) {
+    addInputSec(In<ELFT>::DynSymTab);
 
     bool HasVerNeed = Out<ELFT>::VerNeed->getNeedNum() != 0;
     if (Out<ELFT>::VerDef || HasVerNeed)
@@ -982,20 +1026,30 @@ template <class ELFT> void Writer<ELFT>::addPredefinedSections() {
 
     Add(Out<ELFT>::GnuHashTab);
     Add(Out<ELFT>::HashTab);
-    Add(Out<ELFT>::Dynamic);
-    Add(Out<ELFT>::DynStrTab);
-    if (Out<ELFT>::RelaDyn->hasRelocs())
-      Add(Out<ELFT>::RelaDyn);
+    addInputSec(In<ELFT>::Dynamic);
+    addInputSec(In<ELFT>::DynStrTab);
+    if (In<ELFT>::RelaDyn->hasRelocs())
+      addInputSec(In<ELFT>::RelaDyn);
     Add(Out<ELFT>::MipsRldMap);
   }
 
   // We always need to add rel[a].plt to output if it has entries.
   // Even during static linking it can contain R_[*]_IRELATIVE relocations.
-  if (Out<ELFT>::RelaPlt && Out<ELFT>::RelaPlt->hasRelocs())
-    Add(Out<ELFT>::RelaPlt);
+  if (In<ELFT>::RelaPlt->hasRelocs())
+    addInputSec(In<ELFT>::RelaPlt);
 
-  if (needsGot())
-    Add(Out<ELFT>::Got);
+  // We fill .got and .got.plt sections in scanRelocs(). This is the
+  // reason we don't add it earlier in createSections().
+  if (needsGot()) {
+    if (Config->EMachine == EM_MIPS)
+      addInputSec(In<ELFT>::MipsGot);
+    else
+      addInputSec(In<ELFT>::Got);
+  }
+
+  if (!In<ELFT>::GotPlt->empty())
+    addInputSec(In<ELFT>::GotPlt);
+
   if (!Out<ELFT>::Plt->empty())
     Add(Out<ELFT>::Plt);
   if (!Out<ELFT>::EhFrame->empty())
@@ -1139,9 +1193,9 @@ template <class ELFT> std::vector<PhdrEntry<ELFT>> Writer<ELFT>::createPhdrs() {
     Ret.push_back(std::move(TlsHdr));
 
   // Add an entry for .dynamic.
-  if (Out<ELFT>::DynSymTab) {
-    Phdr &H = *AddHdr(PT_DYNAMIC, Out<ELFT>::Dynamic->getPhdrFlags());
-    H.add(Out<ELFT>::Dynamic);
+  if (In<ELFT>::DynSymTab) {
+    Phdr &H = *AddHdr(PT_DYNAMIC, In<ELFT>::Dynamic->OutSec->getPhdrFlags());
+    H.add(In<ELFT>::Dynamic->OutSec);
   }
 
   // PT_GNU_RELRO includes all sections that should be marked as
@@ -1439,7 +1493,7 @@ template <class ELFT> void Writer<ELFT>::writeHeader() {
   EHdr->e_phnum = Phdrs.size();
   EHdr->e_shentsize = sizeof(Elf_Shdr);
   EHdr->e_shnum = OutputSections.size() + 1;
-  EHdr->e_shstrndx = Out<ELFT>::ShStrTab->SectionIndex;
+  EHdr->e_shstrndx = In<ELFT>::ShStrTab->OutSec->SectionIndex;
 
   if (Config->EMachine == EM_ARM)
     // We don't currently use any features incompatible with EF_ARM_EABI_VER5,

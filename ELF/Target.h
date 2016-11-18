@@ -81,7 +81,7 @@ public:
   uint32_t TlsGotRel;
   uint32_t TlsModuleIndexRel;
   uint32_t TlsOffsetRel;
-  unsigned GotEntrySize;
+  unsigned GotEntrySize = 0;
   unsigned GotPltEntrySize = 0;
   unsigned PltEntrySize;
   unsigned PltHeaderSize;
@@ -105,6 +105,7 @@ public:
 };
 
 StringRef getRelName(uint32_t Type);
+template <class ELFT>
 uint64_t getPPC64TocBase();
 
 const unsigned MipsGPOffset = 0x7ff0;

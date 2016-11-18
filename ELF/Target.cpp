@@ -49,7 +49,6 @@ namespace elf {
 TargetInfo *Target;
 
 static void or32le(uint8_t *P, int32_t V) { write32le(P, read32le(P) | V); }
-static void or32be(uint8_t *P, int32_t V) { write32be(P, read32be(P) | V); }
 
 StringRef getRelName(uint32_t Type) {
   return getELFRelocationTypeName(Config->EMachine, Type);
@@ -133,14 +132,14 @@ private:
                      uint8_t ModRm) const;
 };
 
-class PPCTargetInfo final : public TargetInfo {
+template <class ELFT> class PPCTargetInfo final : public TargetInfo {
 public:
   PPCTargetInfo();
   void relocateOne(uint8_t *Loc, uint32_t Type, uint64_t Val) const override;
   RelExpr getRelExpr(uint32_t Type, const SymbolBody &S) const override;
 };
 
-class PPC64TargetInfo final : public TargetInfo {
+template <class ELFT> class PPC64TargetInfo final : public TargetInfo {
 public:
   PPC64TargetInfo();
   RelExpr getRelExpr(uint32_t Type, const SymbolBody &S) const override;
@@ -237,9 +236,23 @@ TargetInfo *createTarget() {
       fatal("unsupported MIPS target");
     }
   case EM_PPC:
-    return new PPCTargetInfo();
+    switch (Config->EKind) {
+    case ELF32LEKind:
+      return new PPCTargetInfo<ELF32LE>();
+    case ELF32BEKind:
+      return new PPCTargetInfo<ELF32BE>();
+    default:
+      fatal("unsupported PPC target");
+    }
   case EM_PPC64:
-    return new PPC64TargetInfo();
+    switch (Config->EKind) {
+    case ELF64LEKind:
+      return new PPC64TargetInfo<ELF64LE>();
+    case ELF64BEKind:
+      return new PPC64TargetInfo<ELF64BE>();
+    default:
+      fatal("unsupported PPC target");
+    }
   case EM_X86_64:
     if (Config->EKind == ELF32LEKind)
       return new X86_64TargetInfo<ELF32LE>();
@@ -356,7 +369,7 @@ RelExpr X86TargetInfo::adjustRelaxExpr(uint32_t Type, const uint8_t *Data,
 }
 
 void X86TargetInfo::writeGotPltHeader(uint8_t *Buf) const {
-  write32le(Buf, Out<ELF32LE>::Dynamic->Addr);
+  write32le(Buf, In<ELF32LE>::Dynamic->getVA());
 }
 
 void X86TargetInfo::writeGotPlt(uint8_t *Buf, const SymbolBody &S) const {
@@ -596,7 +609,7 @@ void X86_64TargetInfo<ELFT>::writeGotPltHeader(uint8_t *Buf) const {
   // required, but it is documented in the psabi and the glibc dynamic linker
   // seems to use it (note that this is relevant for linking ld.so, not any
   // other program).
-  write64le(Buf, Out<ELFT>::Dynamic->Addr);
+  write64le(Buf, In<ELFT>::Dynamic->getVA());
 }
 
 template <class ELFT>
@@ -957,44 +970,49 @@ static uint16_t applyPPCHighera(uint64_t V) { return (V + 0x8000) >> 32; }
 static uint16_t applyPPCHighest(uint64_t V) { return V >> 48; }
 static uint16_t applyPPCHighesta(uint64_t V) { return (V + 0x8000) >> 48; }
 
-PPCTargetInfo::PPCTargetInfo() {}
+template <class ELFT>
+PPCTargetInfo<ELFT>::PPCTargetInfo() {}
 
-void PPCTargetInfo::relocateOne(uint8_t *Loc, uint32_t Type,
-                                uint64_t Val) const {
+template <class ELFT>
+void PPCTargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
+                                      uint64_t Val) const {
+  const endianness E = ELFT::TargetEndianness;
   switch (Type) {
+  case R_PPC_ADDR16_HI:
+    write16<E>(Loc, applyPPCHi(Val));
+    break;
   case R_PPC_ADDR16_HA:
-    write16be(Loc, applyPPCHa(Val));
+    write16<E>(Loc, applyPPCHa(Val));
     break;
   case R_PPC_ADDR16_LO:
-    write16be(Loc, applyPPCLo(Val));
+    write16<E>(Loc, applyPPCLo(Val));
     break;
   case R_PPC_ADDR32:
   case R_PPC_REL32:
-    write32be(Loc, Val);
+    write32<E>(Loc, Val);
     break;
   case R_PPC_ADDR24:
   case R_PPC_REL24: {
-    uint32_t Inst = read32be(Loc);
-    Inst &= ~0x3FFFFFC;
+    checkAlignment<4>(Val, Type);
+    uint32_t Inst = read32<E>(Loc) & ~0x3FFFFFC;
     Inst |= Val & 0x3FFFFFC;
-    write32be(Loc, Inst);
+    write32<E>(Loc, Inst);
     break;
   }
   case R_PPC_ADDR14:
   case R_PPC_REL14: {
-    uint32_t Inst = read32be(Loc);
-    Inst &= ~0xFFFC;
+    checkAlignment<4>(Val, Type);
+    uint32_t Inst = read32<E>(Loc) & ~0xFFFC;
     Inst |= Val & 0xFFFC;
-    write32be(Loc, Inst);
+    write32<E>(Loc, Inst);
     break;
   }
   case R_PPC_EMB_SDA21: {
     // SDA21 relocation entry is offset one byte into instruction
-    uint8_t *InstLoc = Loc - 1;
-    uint32_t Inst = read32be(InstLoc);
-    Inst &= ~0x1FFFFF;
+    uint8_t *InstLoc = Loc - (E == llvm::support::big ? 1 : 0);
+    uint32_t Inst = read32<E>(InstLoc) & ~0x1FFFFF;
     Inst |= Val & 0x1FFFFF;
-    write32be(InstLoc, Inst);
+    write32<E>(InstLoc, Inst);
     break;
   }
   default:
@@ -1002,7 +1020,9 @@ void PPCTargetInfo::relocateOne(uint8_t *Loc, uint32_t Type,
   }
 }
 
-RelExpr PPCTargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
+template <class ELFT>
+RelExpr PPCTargetInfo<ELFT>::getRelExpr(uint32_t Type,
+                                        const SymbolBody &S) const {
   switch (Type) {
   case R_PPC_REL32:
   case R_PPC_REL24:
@@ -1015,7 +1035,8 @@ RelExpr PPCTargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
   }
 }
 
-PPC64TargetInfo::PPC64TargetInfo() {
+template <class ELFT>
+PPC64TargetInfo<ELFT>::PPC64TargetInfo() {
   PltRel = GotRel = R_PPC64_GLOB_DAT;
   RelativeRel = R_PPC64_RELATIVE;
   GotEntrySize = 8;
@@ -1040,12 +1061,13 @@ PPC64TargetInfo::PPC64TargetInfo() {
 
 static uint64_t PPC64TocOffset = 0x8000;
 
+template <class ELFT>
 uint64_t getPPC64TocBase() {
   // The TOC consists of sections .got, .toc, .tocbss, .plt in that order. The
   // TOC starts where the first of these sections starts. We always create a
   // .got when we see a relocation that uses it, so for us the start is always
   // the .got.
-  uint64_t TocVA = Out<ELF64BE>::Got->Addr;
+  uint64_t TocVA = In<ELFT>::Got->getVA();
 
   // Per the ppc64-elf-linux ABI, The TOC base is TOC value plus 0x8000
   // thus permitting a full 64 Kbytes segment. Note that the glibc startup
@@ -1054,7 +1076,13 @@ uint64_t getPPC64TocBase() {
   return TocVA + PPC64TocOffset;
 }
 
-RelExpr PPC64TargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
+template uint64_t getPPC64TocBase<ELF64BE>();
+template uint64_t getPPC64TocBase<ELF64LE>();
+template uint64_t getPPC64TocBase<ELF32BE>();
+template uint64_t getPPC64TocBase<ELF32LE>();
+
+template <class ELFT>
+RelExpr PPC64TargetInfo<ELFT>::getRelExpr(uint32_t Type, const SymbolBody &S) const {
   switch (Type) {
   default:
     return R_ABS;
@@ -1072,10 +1100,12 @@ RelExpr PPC64TargetInfo::getRelExpr(uint32_t Type, const SymbolBody &S) const {
   }
 }
 
-void PPC64TargetInfo::writePlt(uint8_t *Buf, uint64_t GotEntryAddr,
-                               uint64_t PltEntryAddr, int32_t Index,
-                               unsigned RelOff) const {
-  uint64_t Off = GotEntryAddr - getPPC64TocBase();
+template <class ELFT>
+void PPC64TargetInfo<ELFT>::writePlt(uint8_t *Buf, uint64_t GotEntryAddr,
+                                     uint64_t PltEntryAddr, int32_t Index,
+                                     unsigned RelOff) const {
+  uint64_t Off = GotEntryAddr - getPPC64TocBase<ELFT>();
+  const endianness E = ELFT::TargetEndianness;
 
   // FIXME: What we should do, in theory, is get the offset of the function
   // descriptor in the .opd section, and use that as the offset from %r2 (the
@@ -1083,14 +1113,14 @@ void PPC64TargetInfo::writePlt(uint8_t *Buf, uint64_t GotEntryAddr,
   // be a pointer to the function descriptor in the .opd section. Using
   // this scheme is simpler, but requires an extra indirection per PLT dispatch.
 
-  write32be(Buf, 0xf8410028);                       // std %r2, 40(%r1)
-  write32be(Buf + 4, 0x3d620000 | applyPPCHa(Off)); // addis %r11, %r2, X@ha
-  write32be(Buf + 8, 0xe98b0000 | applyPPCLo(Off)); // ld %r12, X@l(%r11)
-  write32be(Buf + 12, 0xe96c0000);                  // ld %r11,0(%r12)
-  write32be(Buf + 16, 0x7d6903a6);                  // mtctr %r11
-  write32be(Buf + 20, 0xe84c0008);                  // ld %r2,8(%r12)
-  write32be(Buf + 24, 0xe96c0010);                  // ld %r11,16(%r12)
-  write32be(Buf + 28, 0x4e800420);                  // bctr
+  write32<E>(Buf, 0xf8410028);                       // std %r2, 40(%r1)
+  write32<E>(Buf + 4, 0x3d620000 | applyPPCHa(Off)); // addis %r11, %r2, X@ha
+  write32<E>(Buf + 8, 0xe98b0000 | applyPPCLo(Off)); // ld %r12, X@l(%r11)
+  write32<E>(Buf + 12, 0xe96c0000);                  // ld %r11,0(%r12)
+  write32<E>(Buf + 16, 0x7d6903a6);                  // mtctr %r11
+  write32<E>(Buf + 20, 0xe84c0008);                  // ld %r2,8(%r12)
+  write32<E>(Buf + 24, 0xe96c0010);                  // ld %r11,16(%r12)
+  write32<E>(Buf + 28, 0x4e800420);                  // bctr
 }
 
 static std::pair<uint32_t, uint64_t> toAddr16Rel(uint32_t Type, uint64_t Val) {
@@ -1113,69 +1143,72 @@ static std::pair<uint32_t, uint64_t> toAddr16Rel(uint32_t Type, uint64_t Val) {
   }
 }
 
-void PPC64TargetInfo::relocateOne(uint8_t *Loc, uint32_t Type,
-                                  uint64_t Val) const {
+template <class ELFT>
+void PPC64TargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
+                                        uint64_t Val) const {
   // For a TOC-relative relocation, proceed in terms of the corresponding
   // ADDR16 relocation type.
   std::tie(Type, Val) = toAddr16Rel(Type, Val);
 
+  const endianness E = ELFT::TargetEndianness;
   switch (Type) {
   case R_PPC64_ADDR14: {
     checkAlignment<4>(Val, Type);
     // Preserve the AA/LK bits in the branch instruction
-    uint8_t AALK = Loc[3];
-    write16be(Loc + 2, (AALK & 3) | (Val & 0xfffc));
+    uint8_t AALK = Loc[E == llvm::support::big ? 3 : 0];
+    write16<E>(Loc + (E == llvm::support::big ? 2 : 0),
+               (AALK & 3) | (Val & 0xfffc));
     break;
   }
   case R_PPC64_ADDR16:
     checkInt<16>(Val, Type);
-    write16be(Loc, Val);
+    write16<E>(Loc, Val);
     break;
   case R_PPC64_ADDR16_DS:
     checkInt<16>(Val, Type);
-    write16be(Loc, (read16be(Loc) & 3) | (Val & ~3));
+    write16<E>(Loc, (read16<E>(Loc) & 3) | (Val & ~3));
     break;
   case R_PPC64_ADDR16_HA:
   case R_PPC64_REL16_HA:
-    write16be(Loc, applyPPCHa(Val));
+    write16<E>(Loc, applyPPCHa(Val));
     break;
   case R_PPC64_ADDR16_HI:
   case R_PPC64_REL16_HI:
-    write16be(Loc, applyPPCHi(Val));
+    write16<E>(Loc, applyPPCHi(Val));
     break;
   case R_PPC64_ADDR16_HIGHER:
-    write16be(Loc, applyPPCHigher(Val));
+    write16<E>(Loc, applyPPCHigher(Val));
     break;
   case R_PPC64_ADDR16_HIGHERA:
-    write16be(Loc, applyPPCHighera(Val));
+    write16<E>(Loc, applyPPCHighera(Val));
     break;
   case R_PPC64_ADDR16_HIGHEST:
-    write16be(Loc, applyPPCHighest(Val));
+    write16<E>(Loc, applyPPCHighest(Val));
     break;
   case R_PPC64_ADDR16_HIGHESTA:
-    write16be(Loc, applyPPCHighesta(Val));
+    write16<E>(Loc, applyPPCHighesta(Val));
     break;
   case R_PPC64_ADDR16_LO:
-    write16be(Loc, applyPPCLo(Val));
+    write16<E>(Loc, applyPPCLo(Val));
     break;
   case R_PPC64_ADDR16_LO_DS:
   case R_PPC64_REL16_LO:
-    write16be(Loc, (read16be(Loc) & 3) | (applyPPCLo(Val) & ~3));
+    write16<E>(Loc, (read16<E>(Loc) & 3) | (applyPPCLo(Val) & ~3));
     break;
   case R_PPC64_ADDR32:
   case R_PPC64_REL32:
     checkInt<32>(Val, Type);
-    write32be(Loc, Val);
+    write32<E>(Loc, Val);
     break;
   case R_PPC64_ADDR64:
   case R_PPC64_REL64:
   case R_PPC64_TOC:
-    write64be(Loc, Val);
+    write64<E>(Loc, Val);
     break;
   case R_PPC64_REL24: {
     uint32_t Mask = 0x03FFFFFC;
     checkInt<24>(Val, Type);
-    write32be(Loc, (read32be(Loc) & ~Mask) | (Val & Mask));
+    write32<E>(Loc, (read32<E>(Loc) & ~Mask) | (Val & Mask));
     break;
   }
   default:
@@ -1958,7 +1991,7 @@ RelExpr MipsTargetInfo<ELFT>::getRelExpr(uint32_t Type,
     return R_HINT;
   case R_MIPS_GPREL16:
   case R_MIPS_GPREL32:
-    return R_GOTREL;
+    return R_MIPS_GOTREL;
   case R_MIPS_26:
     return R_PLT;
   case R_MIPS_HI16:
