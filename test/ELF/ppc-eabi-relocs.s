@@ -18,8 +18,8 @@ smallstr2:
   ori 13, 13, _SDA_BASE_@l
   lis 2, _SDA2_BASE_@ha
   ori 2, 2, _SDA2_BASE_@l
-  lwz 4, smallstr@sdarx(0)
-  lwz 5, smallstr2@sdarx(0)
+  lwz 4, smallstr@sda21(0)
+  lwz 5, smallstr2@sda21(0)
 
 # CHECK: Disassembly of section .R_PPC_EMB_SDA21:
 # CHECK: .R_PPC_EMB_SDA21:
