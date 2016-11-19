@@ -685,9 +685,20 @@ static uint8_t getBitcodeMachineKind(MemoryBufferRef MB) {
   }
 }
 
+static uint8_t getBitcodeOSABIKind(MemoryBufferRef MB) {
+  Triple T(check(getBitcodeTargetTriple(MB)));
+  switch (T.getEnvironment()) {
+  case Triple::EABI:
+    return ELFOSABI_STANDALONE;
+  default:
+    return 0;
+  }
+}
+
 BitcodeFile::BitcodeFile(MemoryBufferRef MB) : InputFile(BitcodeKind, MB) {
   EKind = getBitcodeELFKind(MB);
   EMachine = getBitcodeMachineKind(MB);
+  OSABI = getBitcodeOSABIKind(MB);
 }
 
 static uint8_t mapVisibility(GlobalValue::VisibilityTypes GvVisibility) {

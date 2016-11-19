@@ -25,6 +25,7 @@
 #include "lld/Driver/Driver.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/TargetRegistry.h"
@@ -604,12 +605,6 @@ static void initLLVM(opt::InputArgList &Args) {
   InitializeAllAsmPrinters();
   InitializeAllAsmParsers();
 
-  // This is a flag to discard all but GlobalValue names.
-  // We want to enable it by default because it saves memory.
-  // Disable it only when a developer option (-save-temps) is given.
-  Driver->Context.setDiscardValueNames(!Config->SaveTemps);
-  Driver->Context.enableDebugTypeODRUniquing();
-
   // Parse and evaluate -mllvm options.
   std::vector<const char *> V;
   V.push_back("lld (LLVM option parsing)");
@@ -728,9 +723,22 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
   readConfigs(Args);
   initLLVM(Args);
   createFiles(Args);
+  inferMachineType();
   checkOptions(Args);
-  Config->EKind = ELF32BEKind;
-  Config->EMachine = EM_PPC;
+
+  if (Config->EKind != ELF32BEKind) {
+    error("Hanafuda link only accepts ELF32BE kind");
+    return;
+  }
+  if (Config->EMachine != EM_PPC) {
+    error("Hanafuda link only accepts EM_PPC machine");
+    return;
+  }
+  if (Config->OSABI != ELF::ELFOSABI_STANDALONE) {
+    error("Hanafuda link only accepts ELFOSABI_STANDALONE");
+    return;
+  }
+
   Config->SdaBase = DolFile->getSdataBase();
   Config->Sda2Base = DolFile->getSdata2Base();
   if (HasError)
