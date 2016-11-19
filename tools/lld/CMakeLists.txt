@@ -12,8 +12,16 @@ target_link_libraries(lld
 install(TARGETS lld
   RUNTIME DESTINATION bin)
 
+if(NOT CMAKE_CONFIGURATION_TYPES)
+  add_custom_target(install-lld
+    DEPENDS lld
+    COMMAND "${CMAKE_COMMAND}"
+    -DCMAKE_INSTALL_COMPONENT=lld
+    -P "${CMAKE_BINARY_DIR}/cmake_install.cmake")
+endif()
+
 if(NOT LLD_SYMLINKS_TO_CREATE)
-  set(LLD_SYMLINKS_TO_CREATE lld-link ld.lld)
+  set(LLD_SYMLINKS_TO_CREATE lld-link ld.lld lld-hanafuda)
 endif()
 
 foreach(link ${LLD_SYMLINKS_TO_CREATE})
