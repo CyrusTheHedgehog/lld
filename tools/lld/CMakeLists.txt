@@ -21,7 +21,7 @@ if(NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 if(NOT LLD_SYMLINKS_TO_CREATE)
-  set(LLD_SYMLINKS_TO_CREATE lld-link ld.lld lld-hanafuda)
+  set(LLD_SYMLINKS_TO_CREATE lld-hanafuda)
 endif()
 
 foreach(link ${LLD_SYMLINKS_TO_CREATE})
