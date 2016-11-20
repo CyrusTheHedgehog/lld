@@ -535,7 +535,7 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
         if (Desc.getOpcode() == ppcBL) {
           uint32_t Imm = getPPCImmediateOp(Inst);
           if (Imm != 0xffffffff) {
-            uint32_t Addr = Imm << 2;
+            int32_t Addr = SignExtend32(Imm << 2, 24);
             OrigCallAddrToInstFileOffs.insert(std::make_pair(Addr + VAIndex,
               Relocation{uint32_t(VAIndex), uint32_t(FileIndex), R_PPC_REL24}));
           }
@@ -574,6 +574,10 @@ void DOLFile::patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr) 
     elf::Target->relocateOne(
       const_cast<uint8_t *>(MB.getBuffer().bytes_begin() + P.second.Offset),
         P.second.Type, Addr);
+
+    if (Config->Verbose)
+      outs() << format("Patched 0x%08X(0x%08X) from 0x%08X to 0x%08X\n",
+                       P.second.Addr, P.second.Offset, oldAddr, newAddr);
   }
 }
 
@@ -802,6 +806,9 @@ void LinkerDriver::link(opt::InputArgList &Args) {
         continue;
       }
 
+      if (Config->Verbose)
+        outs() << "Patching '" << OldSym->getName() <<
+                  "' to '" << NewSym->getName() << "'\n";
       DolFile->patchTargetAddressRelocations(OldSym->Value,
                                              NewSym->getVA<ELF32BE>(0));
     }
