@@ -26,7 +26,6 @@ class DefinedCommon;
 class SymbolBody;
 struct SectionPiece;
 
-template <class ELFT> class ICF;
 template <class ELFT> class DefinedRegular;
 template <class ELFT> class ObjectFile;
 template <class ELFT> class OutputSection;
@@ -46,8 +45,8 @@ public:
   // If GC is disabled, all sections are considered live by default.
   InputSectionData(Kind SectionKind, StringRef Name, ArrayRef<uint8_t> Data,
                    bool Compressed, bool Live)
-      : SectionKind(SectionKind), Live(Live), Compressed(Compressed),
-        Name(Name), Data(Data) {}
+      : SectionKind(SectionKind), Live(Live), Assigned(false),
+        Compressed(Compressed), Name(Name), Data(Data) {}
 
 private:
   unsigned SectionKind : 3;
@@ -55,8 +54,9 @@ private:
 public:
   Kind kind() const { return (Kind)SectionKind; }
 
-  unsigned Live : 1; // for garbage collection
-  unsigned Compressed : 1;
+  unsigned Live : 1;       // for garbage collection
+  unsigned Assigned : 1;   // for linker script
+  unsigned Compressed : 1; // true if section data is compressed
   uint32_t Alignment;
   StringRef Name;
   ArrayRef<uint8_t> Data;
@@ -238,7 +238,6 @@ public:
 
 // This corresponds to a non SHF_MERGE section of an input file.
 template <class ELFT> class InputSection : public InputSectionBase<ELFT> {
-  friend ICF<ELFT>;
   typedef InputSectionBase<ELFT> Base;
   typedef typename ELFT::Shdr Elf_Shdr;
   typedef typename ELFT::Rela Elf_Rela;
@@ -285,15 +284,15 @@ public:
   template <class RelTy>
   void relocateNonAlloc(uint8_t *Buf, llvm::ArrayRef<RelTy> Rels);
 
-private:
-  template <class RelTy>
-  void copyRelocations(uint8_t *Buf, llvm::ArrayRef<RelTy> Rels);
+  // Used by ICF.
+  uint64_t GroupId = 0;
 
   // Called by ICF to merge two input sections.
   void replace(InputSection<ELFT> *Other);
 
-  // Used by ICF.
-  uint64_t GroupId = 0;
+private:
+  template <class RelTy>
+  void copyRelocations(uint8_t *Buf, llvm::ArrayRef<RelTy> Rels);
 
   llvm::TinyPtrVector<const Thunk<ELFT> *> Thunks;
 };
