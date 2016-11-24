@@ -21,7 +21,6 @@ add_lld_library(lldELF
   Relocations.cpp
   ScriptParser.cpp
   Strings.cpp
-  SymbolListFile.cpp
   SymbolTable.cpp
   Symbols.cpp
   SyntheticSections.cpp

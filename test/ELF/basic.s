@@ -230,15 +230,15 @@ _start:
 # CANNOT_OPEN: cannot open {{.*}}.no.such.file: {{[Nn]}}o such file or directory
 
 # RUN: not ld.lld %t -o 2>&1 | FileCheck --check-prefix=NO_O_VAL %s
-# NO_O_VAL: missing arg value for "-o", expected 1 argument.
+# NO_O_VAL: -o: missing argument
 
 # RUN: not ld.lld --foo 2>&1 | FileCheck --check-prefix=UNKNOWN %s
 # UNKNOWN: unknown argument: --foo
 
 # RUN: llvm-mc -filetype=obj -triple=x86_64-unknown-linux %s -o %t
 # RUN: not ld.lld %t %t -o %t2 2>&1 | FileCheck --check-prefix=DUP %s
-# DUP: {{.*}} (.text+0x0): duplicate symbol '_start'
-# DUP: {{.*}} (.text+0x0): previous definition was here
+# DUP: {{.*}}:(.text+0x0): duplicate symbol '_start'
+# DUP: {{.*}}:(.text+0x0): previous definition was here
 
 # RUN: not ld.lld %t -o %t -m wrong_emul_fbsd 2>&1 | FileCheck --check-prefix=UNKNOWN_EMUL %s
 # UNKNOWN_EMUL: unknown emulation: wrong_emul_fbsd
