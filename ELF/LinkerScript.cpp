@@ -81,6 +81,15 @@ template <class ELFT> static void addSynthetic(SymbolAssignment *Cmd) {
         Cmd->Expression(0) - Sec->Addr;
 }
 
+static bool isUnderSysroot(StringRef Path) {
+  if (Config->Sysroot == "")
+    return false;
+  for (; !Path.empty(); Path = sys::path::parent_path(Path))
+    if (sys::fs::equivalent(Config->Sysroot, Path))
+      return true;
+  return false;
+}
+
 template <class ELFT> static void addSymbol(SymbolAssignment *Cmd) {
   if (Cmd->Expression.IsAbsolute())
     addRegular<ELFT>(Cmd);
@@ -467,6 +476,11 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
     DataCmd->Offset = Dot - CurOutSec->Addr;
     Dot += DataCmd->Size;
     CurOutSec->Size = Dot - CurOutSec->Addr;
+    return;
+  }
+
+  if (auto *AssertCmd = dyn_cast<AssertCommand>(&Base)) {
+    AssertCmd->Expression(Dot);
     return;
   }
 
@@ -948,8 +962,9 @@ class elf::ScriptParser final : public ScriptParserBase {
   typedef void (ScriptParser::*Handler)();
 
 public:
-  ScriptParser(MemoryBufferRef MB, bool B)
-      : ScriptParserBase(MB), IsUnderSysroot(B) {}
+  ScriptParser(MemoryBufferRef MB)
+      : ScriptParserBase(MB),
+        IsUnderSysroot(isUnderSysroot(MB.getBufferIdentifier())) {}
 
   void readLinkerScript();
   void readVersionScript();
@@ -1310,7 +1325,7 @@ InputSectionDescription *
 ScriptParser::readInputSectionRules(StringRef FilePattern) {
   auto *Cmd = new InputSectionDescription(FilePattern);
   expect("(");
-  while (!HasError && !consume(")")) {
+  while (!Error && !consume(")")) {
     SortSectionPolicy Outer = readSortKind();
     SortSectionPolicy Inner = SortSectionPolicy::Default;
     std::vector<SectionPattern> V;
@@ -1413,18 +1428,22 @@ ScriptParser::readOutputSectionDescription(StringRef OutSec) {
 
   while (!Error && !consume("}")) {
     StringRef Tok = next();
-    if (SymbolAssignment *Assignment = readProvideOrAssignment(Tok))
+    if (SymbolAssignment *Assignment = readProvideOrAssignment(Tok)) {
       Cmd->Commands.emplace_back(Assignment);
-    else if (BytesDataCommand *Data = readBytesDataCommand(Tok))
+    } else if (BytesDataCommand *Data = readBytesDataCommand(Tok)) {
       Cmd->Commands.emplace_back(Data);
-    else if (Tok == "FILL")
+    } else if (Tok == "ASSERT") {
+      Cmd->Commands.emplace_back(new AssertCommand(readAssert()));
+      expect(";");
+    } else if (Tok == "FILL") {
       Cmd->Filler = readFill();
-    else if (Tok == "SORT")
+    } else if (Tok == "SORT") {
       readSort();
-    else if (peek() == "(")
+    } else if (peek() == "(") {
       Cmd->Commands.emplace_back(readInputSectionDescription(Tok));
-    else
+    } else {
       setError("unknown command " + Tok);
+    }
   }
   Cmd->Phdrs = readOutputSectionPhdrs();
 
@@ -1898,22 +1917,12 @@ std::vector<SymbolVersion> ScriptParser::readVersionExtern() {
   return Ret;
 }
 
-static bool isUnderSysroot(StringRef Path) {
-  if (Config->Sysroot == "")
-    return false;
-  for (; !Path.empty(); Path = sys::path::parent_path(Path))
-    if (sys::fs::equivalent(Config->Sysroot, Path))
-      return true;
-  return false;
-}
-
 void elf::readLinkerScript(MemoryBufferRef MB) {
-  StringRef Path = MB.getBufferIdentifier();
-  ScriptParser(MB, isUnderSysroot(Path)).readLinkerScript();
+  ScriptParser(MB).readLinkerScript();
 }
 
 void elf::readVersionScript(MemoryBufferRef MB) {
-  ScriptParser(MB, false).readVersionScript();
+  ScriptParser(MB).readVersionScript();
 }
 
 template class elf::LinkerScript<ELF32LE>;

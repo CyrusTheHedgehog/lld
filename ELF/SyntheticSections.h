@@ -30,8 +30,10 @@ public:
 
   virtual ~SyntheticSection() = default;
   virtual void writeTo(uint8_t *Buf) = 0;
-  virtual size_t getSize() const { return this->Data.size(); }
+  virtual size_t getSize() const = 0;
   virtual void finalize() {}
+  virtual bool empty() const { return false; }
+
   uintX_t getVA() const {
     return this->OutSec ? this->OutSec->Addr + this->OutSecOff : 0;
   }
@@ -49,10 +51,11 @@ public:
   void writeTo(uint8_t *Buf) override;
   size_t getSize() const override { return Size; }
   void finalize() override;
+  bool empty() const override;
+
   void addEntry(SymbolBody &Sym);
   bool addDynTlsEntry(SymbolBody &Sym);
   bool addTlsIndex();
-  bool empty() const { return Entries.empty(); }
   uintX_t getGlobalDynAddr(const SymbolBody &B) const;
   uintX_t getGlobalDynOffset(const SymbolBody &B) const;
 
@@ -88,7 +91,8 @@ private:
   uint8_t *HashBuf;
 };
 
-template <class ELFT> class MipsGotSection final : public SyntheticSection<ELFT> {
+template <class ELFT>
+class MipsGotSection final : public SyntheticSection<ELFT> {
   typedef typename ELFT::uint uintX_t;
 
 public:
@@ -96,10 +100,10 @@ public:
   void writeTo(uint8_t *Buf) override;
   size_t getSize() const override { return Size; }
   void finalize() override;
+  bool empty() const override;
   void addEntry(SymbolBody &Sym, uintX_t Addend, RelExpr Expr);
   bool addDynTlsEntry(SymbolBody &Sym);
   bool addTlsIndex();
-  bool empty() const { return PageEntriesNum == 0 && TlsEntries.empty(); }
   uintX_t getPageEntryOffset(uintX_t Addr);
   uintX_t getBodyEntryOffset(const SymbolBody &B, uintX_t Addend) const;
   uintX_t getGlobalDynOffset(const SymbolBody &B) const;
@@ -119,6 +123,8 @@ public:
   uintX_t getTlsOffset() const;
 
   uint32_t getTlsIndexOff() const { return TlsIndexOff; }
+
+  unsigned getGp() const;
 
 private:
   // MIPS GOT consists of three parts: local, global and tls. Each part
@@ -191,9 +197,9 @@ class GotPltSection final : public SyntheticSection<ELFT> {
 public:
   GotPltSection();
   void addEntry(SymbolBody &Sym);
-  bool empty() const;
   size_t getSize() const override;
   void writeTo(uint8_t *Buf) override;
+  bool empty() const override { return Entries.empty(); }
 
 private:
   std::vector<const SymbolBody *> Entries;
@@ -312,8 +318,8 @@ public:
   unsigned getRelocOffset();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
+  bool empty() const override { return Relocs.empty(); }
   size_t getSize() const override { return Relocs.size() * this->Entsize; }
-  bool hasRelocs() const { return !Relocs.empty(); }
   size_t getRelativeRelocCount() const { return NumRelativeRelocs; }
 
 private:
@@ -418,7 +424,7 @@ public:
   void writeTo(uint8_t *Buf) override;
   size_t getSize() const override;
   void addEntry(SymbolBody &Sym);
-  bool empty() const { return Entries.empty(); }
+  bool empty() const override { return Entries.empty(); }
 
 private:
   std::vector<std::pair<const SymbolBody *, unsigned>> Entries;
@@ -468,6 +474,7 @@ public:
   void writeTo(uint8_t *Buf) override;
   size_t getSize() const override;
   void addFde(uint32_t Pc, uint32_t FdeVA);
+  bool empty() const override;
 
 private:
   struct FdeData {
@@ -518,6 +525,7 @@ public:
   void finalize() override;
   size_t getSize() const override;
   void writeTo(uint8_t *Buf) override;
+  bool empty() const override;
 };
 
 // The .gnu.version_r section defines the version identifiers used by
@@ -544,6 +552,7 @@ public:
   void writeTo(uint8_t *Buf) override;
   size_t getSize() const override;
   size_t getNeedNum() const { return Needed.size(); }
+  bool empty() const override;
 };
 
 // .MIPS.abiflags section.
@@ -598,6 +607,24 @@ private:
   Elf_Mips_RegInfo Reginfo;
 };
 
+// This is a MIPS specific section to hold a space within the data segment
+// of executable file which is pointed to by the DT_MIPS_RLD_MAP entry.
+// See "Dynamic section" in Chapter 5 in the following document:
+// ftp://www.linux-mips.org/pub/linux/mips/doc/ABI/mipsabi.pdf
+template <class ELFT> class MipsRldMapSection : public SyntheticSection<ELFT> {
+public:
+  MipsRldMapSection();
+  size_t getSize() const override { return sizeof(typename ELFT::uint); }
+  void writeTo(uint8_t *Buf) override;
+};
+
+template <class ELFT> class ARMExidxSentinelSection : public SyntheticSection<ELFT> {
+public:
+  ARMExidxSentinelSection();
+  size_t getSize() const override { return 8; }
+  void writeTo(uint8_t *Buf) override;
+};
+
 template <class ELFT> InputSection<ELFT> *createCommonSection();
 template <class ELFT> InputSection<ELFT> *createInterpSection();
 template <class ELFT> MergeInputSection<ELFT> *createCommentSection();
@@ -617,9 +644,7 @@ template <class ELFT> struct In {
   static GotPltSection<ELFT> *GotPlt;
   static HashTableSection<ELFT> *HashTab;
   static InputSection<ELFT> *Interp;
-  static MipsAbiFlagsSection<ELFT> *MipsAbiFlags;
-  static MipsOptionsSection<ELFT> *MipsOptions;
-  static MipsReginfoSection<ELFT> *MipsReginfo;
+  static MipsRldMapSection<ELFT> *MipsRldMap;
   static PltSection<ELFT> *Plt;
   static RelocationSection<ELFT> *RelaDyn;
   static RelocationSection<ELFT> *RelaPlt;
@@ -644,9 +669,7 @@ template <class ELFT> MipsGotSection<ELFT> *In<ELFT>::MipsGot;
 template <class ELFT> GotPltSection<ELFT> *In<ELFT>::GotPlt;
 template <class ELFT> HashTableSection<ELFT> *In<ELFT>::HashTab;
 template <class ELFT> InputSection<ELFT> *In<ELFT>::Interp;
-template <class ELFT> MipsAbiFlagsSection<ELFT> *In<ELFT>::MipsAbiFlags;
-template <class ELFT> MipsOptionsSection<ELFT> *In<ELFT>::MipsOptions;
-template <class ELFT> MipsReginfoSection<ELFT> *In<ELFT>::MipsReginfo;
+template <class ELFT> MipsRldMapSection<ELFT> *In<ELFT>::MipsRldMap;
 template <class ELFT> PltSection<ELFT> *In<ELFT>::Plt;
 template <class ELFT> RelocationSection<ELFT> *In<ELFT>::RelaDyn;
 template <class ELFT> RelocationSection<ELFT> *In<ELFT>::RelaPlt;
