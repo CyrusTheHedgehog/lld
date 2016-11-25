@@ -17,7 +17,6 @@
 #include "Memory.h"
 #include "OutputSections.h"
 #include "Strings.h"
-#include "SymbolListFile.h"
 #include "SymbolTable.h"
 #include "Target.h"
 #include "Writer.h"
@@ -72,8 +71,8 @@ class LinkerDriver;
 /// * D: .rodata
 /// * D: .data
 /// * B: .bss
-/// * D: .sdata (optional)
-/// * D: .sdata2 (optional)
+/// * D: .sdata+sbss (optional)
+/// * D: .sdata2+sbss2 (optional)
 ///
 /// When generating a patched DOL, an additional text and data
 /// section is appended to store additional binary components
@@ -127,15 +126,45 @@ private:
   uint32_t BssSize = 0;
   uint32_t EntryPoint = 0;
   uint32_t StackBase = 0;
+  uint32_t StackEnd = 0;
   uint32_t SdataBase = 0;
   uint32_t Sdata2Base = 0;
+  uint32_t ArenaLo = 0;
   bool DolphinSections = false;
 
   struct Relocation {
     uint32_t Addr;
     uint32_t Offset;
     uint32_t Type;
+
+    void patch(MemoryBufferRef MB, uint32_t Val) const {
+      uint32_t ActualType;
+      if (Type == R_PPC_ADDR16_HA || Type == R_PPC_ADDR16_HI)
+        ActualType = ((Val & 0xffff) >= 0x8000) ? R_PPC_ADDR16_HA : R_PPC_ADDR16_HI;
+      else
+        ActualType = Type;
+
+      elf::Target->relocateOne(
+        const_cast<uint8_t *>(MB.getBuffer().bytes_begin() + Offset), ActualType, Val);
+
+      if (Config->Verbose)
+        outs() << format("Patched 0x%08X(0x%08X) to 0x%08X\n",
+                         Addr, Offset, Val);
+    }
   };
+
+  struct RelocationPair {
+    Relocation Hi, Lo;
+
+    void patch(MemoryBufferRef MB, uint32_t Val) const {
+      Hi.patch(MB, Val);
+      Lo.patch(MB, Val);
+    }
+  };
+
+  llvm::SmallVector<RelocationPair, 5> StackBaseRels;
+  llvm::SmallVector<RelocationPair, 5> StackEndRels;
+  llvm::SmallVector<RelocationPair, 5> ArenaLoRels;
 
   // {call-target-addr, Relocation}
   std::unordered_multimap<uint32_t, Relocation>
@@ -311,8 +340,10 @@ public:
   }
 
   uint32_t getStackBase() const { return StackBase; }
+  uint32_t getStackEnd() const { return StackEnd; }
   uint32_t getSdataBase() const { return SdataBase; }
   uint32_t getSdata2Base() const { return Sdata2Base; }
+  uint32_t getArenaLo() const { return ArenaLo; }
 
   bool validateSymbolAddr(uint32_t addr, HanafudaSecType& secOut, int& secIdxOut) const {
     for (int i = 0; i < 7; ++i) {
@@ -355,6 +386,18 @@ public:
   }
 
   void patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr);
+
+  void patchForGrowDelta(uint32_t Delta) {
+    StackBase += Delta;
+    StackEnd += Delta;
+    ArenaLo += Delta;
+    for (const RelocationPair &Rel : StackBaseRels)
+      Rel.patch(MB, StackBase);
+    for (const RelocationPair &Rel : StackEndRels)
+      Rel.patch(MB, StackEnd);
+    for (const RelocationPair &Rel : ArenaLoRels)
+      Rel.patch(MB, ArenaLo);
+  }
 
   void writeTo(uint8_t *BufData) const {
     Header SwappedHead = {};
@@ -433,11 +476,18 @@ public:
   void main(ArrayRef<const char *> Args, bool CanExitEarly);
 };
 
-static uint32_t getPPCRegisterOp(const MCInst &Inst) {
+static uint32_t getPPCRegisterOp(const MCInst &Inst, int idx = 0) {
   for (const MCOperand &op : Inst)
-    if (op.isReg())
+    if (op.isReg() && !(idx--))
       return op.getReg();
   return 0xffffffff;
+}
+
+static uint32_t getPPCGprOp(const MCInst &Inst, unsigned R0, int idx = 0) {
+  uint32_t Reg = getPPCRegisterOp(Inst, idx);
+  if (Reg < R0 || Reg >= (R0 + 32))
+    return 0;
+  return Reg - R0;
 }
 
 static uint32_t getPPCImmediateOp(const MCInst &Inst) {
@@ -447,52 +497,125 @@ static uint32_t getPPCImmediateOp(const MCInst &Inst) {
   return 0xffffffff;
 }
 
+static uint32_t getPPCHiImmediateOp(const MCInst &Inst) {
+  return getPPCImmediateOp(Inst) << 16;
+}
+
+static uint32_t decodeHa(uint32_t In) {
+  return (In - 0x8000) & 0xffff0000;
+}
+
+static bool isOneOf(const MCInstrDesc &Desc, unsigned K1, unsigned K2) {
+  return (Desc.getOpcode() == K1) || (Desc.getOpcode() == K2);
+}
+template <typename... Ts>
+static bool isOneOf(const MCInstrDesc &Desc, unsigned K1, unsigned K2, Ts... Ks) {
+  return (Desc.getOpcode() == K1) || isOneOf(Desc, K2, Ks...);
+}
+
 void DOLFile::scanForRelocations(LinkerDriver &Drv) {
-  MCRegisterInfo &MRI = *Drv.MRI;
-  MCInstrInfo &MCII = *Drv.MCII;
+  struct PPCInfo {
+    unsigned R0;
+    unsigned R1;
+    unsigned R2;
+    unsigned R13;
 
-  unsigned ppcR1;
-  unsigned ppcR2;
-  unsigned ppcR13;
+    unsigned BL;
+    unsigned BA;
+    unsigned LIS;
+    unsigned ORI;
+    unsigned ADDI;
 
-  unsigned ppcBL;
-  unsigned ppcBA;
-  unsigned ppcLIS;
-  unsigned ppcORI;
+    unsigned LBZ;
+    unsigned LHA;
+    unsigned LHZ;
+    unsigned LWZ;
+    unsigned LFS;
+    unsigned LFD;
 
-  for (unsigned i = 0; i < MRI.getNumRegs(); ++i) {
-    StringRef name(MRI.getName(i));
-    if (name == "R1")
-      ppcR1 = i;
-    else if (name == "R2")
-      ppcR2 = i;
-    else if (name == "R13")
-      ppcR13 = i;
-  }
+    PPCInfo(LinkerDriver &Drv) {
+      MCRegisterInfo &MRI = *Drv.MRI;
+      MCInstrInfo &MCII = *Drv.MCII;
 
-  for (unsigned i = 0; i < MCII.getNumOpcodes(); ++i) {
-    StringRef name = MCII.getName(i);
-    if (name == "BL")
-      ppcBL = i;
-    if (name == "BA")
-      ppcBA = i;
-    else if (name == "LIS")
-      ppcLIS = i;
-    else if (name == "ORI")
-      ppcORI = i;
-  }
+      for (unsigned i = 0; i < MRI.getNumRegs(); ++i) {
+        StringRef name(MRI.getName(i));
+        if (name == "R0")
+          R0 = i;
+        if (name == "R1")
+          R1 = i;
+        else if (name == "R2")
+          R2 = i;
+        else if (name == "R13")
+          R13 = i;
+      }
+
+      for (unsigned i = 0; i < MCII.getNumOpcodes(); ++i) {
+        StringRef name = MCII.getName(i);
+        if (name == "BL")
+          BL = i;
+        if (name == "BA")
+          BA = i;
+        else if (name == "LIS")
+          LIS = i;
+        else if (name == "ORI")
+          ORI = i;
+        else if (name == "ADDI")
+          ADDI = i;
+        else if (name == "LBZ")
+          LBZ = i;
+        else if (name == "LHA")
+          LHA = i;
+        else if (name == "LHZ")
+          LHZ = i;
+        else if (name == "LWZ")
+          LWZ = i;
+        else if (name == "LFS")
+          LFS = i;
+        else if (name == "LFD")
+          LFD = i;
+      }
+    }
+
+    bool isMemri(const MCInstrDesc &Desc) const {
+      return isOneOf(Desc, LBZ, LHA, LHZ, LWZ, LFS, LFD);
+    }
+  } PPCI(Drv);
+
+  RelocationPair StackEndRel;
 
   uint64_t Size;
   ArrayRef<uint8_t> Data(reinterpret_cast<const unsigned char*>(
                          MB.getBuffer().data()), MB.getBufferSize());
+
+  // Iterate text sections for disassembly
   for (int s = 0; s < 7; ++s) {
     Section& sec = Texts[s];
     if (!sec.Offset)
       continue;
 
-    for (uint64_t Index = 0; Index < sec.Length; Index += Size) {
-      uint64_t FileIndex = sec.Offset + Index;
-      uint64_t VAIndex = sec.Addr + Index;
+    // Caches the latest `lis` immediates for 32 GPRs
+    class HiCheck {
+      uint32_t HC[32] = {};
+    public:
+      uint32_t get(unsigned Reg) const {
+        if (Reg >= 32)
+          return false;
+        return HC[Reg];
+      }
+      void set(unsigned Reg, uint32_t Val) {
+        if (Reg >= 32)
+          return;
+        HC[Reg] = Val;
+      }
+    } HC;
+
+    // Caches the latest `lis` relocations for 32 GPRs
+    Relocation TmpHa[32] = {};
+
+    // Disassemble the section
+    for (uint32_t Index = 0; Index < sec.Length; Index += Size) {
+      uint32_t FileIndex = sec.Offset + Index;
+      uint32_t VAIndex = sec.Addr + Index;
 
       MCDisassembler::DecodeStatus S;
       MCInst Inst;
@@ -513,38 +636,100 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
         if (s == 0) {
           // Scan .init instructions for stack and small data bases
           uint32_t InstReg = getPPCRegisterOp(Inst);
-          if (InstReg == ppcR1) {
-            if (Desc.getOpcode() == ppcLIS)
-              StackBase = getPPCImmediateOp(Inst) << 16;
-            else if (Desc.getOpcode() == ppcORI)
+          if (InstReg == PPCI.R1) {
+            // Define _stack_base_
+            if (Desc.getOpcode() == PPCI.LIS) {
+              StackBase = getPPCHiImmediateOp(Inst);
+              TmpHa[1] = Relocation{VAIndex + 2, FileIndex + 2, R_PPC_ADDR16_HI};
+            } else if (Desc.getOpcode() == PPCI.ORI) {
               StackBase |= getPPCImmediateOp(Inst);
-          } else if (InstReg == ppcR2) {
-            if (Desc.getOpcode() == ppcLIS)
-              Sdata2Base = getPPCImmediateOp(Inst) << 16;
-            else if (Desc.getOpcode() == ppcORI)
+              RelocationPair P = {TmpHa[1],
+                                  Relocation{VAIndex + 2, FileIndex + 2, R_PPC_ADDR16_LO}};
+              StackBaseRels.emplace_back(P);
+            }
+
+          } else if (InstReg == PPCI.R2) {
+            // Define _SDA2_BASE_
+            if (Desc.getOpcode() == PPCI.LIS)
+              Sdata2Base = getPPCHiImmediateOp(Inst);
+            else if (Desc.getOpcode() == PPCI.ORI)
               Sdata2Base |= getPPCImmediateOp(Inst);
-          } else if (InstReg == ppcR13) {
-            if (Desc.getOpcode() == ppcLIS)
-              SdataBase = getPPCImmediateOp(Inst) << 16;
-            else if (Desc.getOpcode() == ppcORI)
+
+          } else if (InstReg == PPCI.R13) {
+            // Define _SDA_BASE_
+            if (Desc.getOpcode() == PPCI.LIS)
+              SdataBase = getPPCHiImmediateOp(Inst);
+            else if (Desc.getOpcode() == PPCI.ORI)
               SdataBase |= getPPCImmediateOp(Inst);
+          }
+
+        } else {
+          // Scan remaining sections for system relocations
+          if (Desc.getOpcode() == PPCI.LIS) {
+            // Set Ha immedtate if within 0x20000 of the program end
+            uint32_t Imm = getPPCHiImmediateOp(Inst);
+            if ((Imm >> 24) == 0x80 && Imm >= ((StackBase - 0x20000) & 0xffff0000)) {
+              unsigned DstReg = getPPCGprOp(Inst, PPCI.R0);
+              HC.set(DstReg, Imm);
+              TmpHa[DstReg] = Relocation{VAIndex + 2, FileIndex + 2, R_PPC_ADDR16_HI};
+            }
+
+          } else if (PPCI.isMemri(Desc)) {
+            // Clear out Ha immediate when consumed
+            unsigned SrcReg = getPPCGprOp(Inst, PPCI.R0, 1);
+            HC.set(SrcReg, 0);
+
+          } else if (Desc.getOpcode() == PPCI.ADDI) {
+            // Potential ADDR16 relocation to handle
+            unsigned SrcReg = getPPCGprOp(Inst, PPCI.R0, 1);
+            if (uint32_t Hi = HC.get(SrcReg)) {
+              uint32_t Imm = getPPCImmediateOp(Inst) & 0xffff;
+              RelocationPair P = {TmpHa[SrcReg],
+                                  Relocation{VAIndex + 2, FileIndex + 2, R_PPC_ADDR16_LO}};
+              if (Imm >= 0x8000) {
+                Imm |= decodeHa(Hi);
+                P.Hi.Type = R_PPC_ADDR16_HA;
+              } else
+                Imm |= Hi;
+
+              if (Imm == StackBase) {
+                // Scan for _stack_base_
+                StackBaseRels.emplace_back(P);
+
+              } else if (Imm < StackBase && Imm > (StackBase - 0x20000)) {
+                // Scan for _stack_end_
+                if (Imm > StackEnd) {
+                  StackEndRel = P;
+                  StackEnd = Imm;
+                }
+
+              } else if (!ArenaLo && Imm > StackBase && (Imm - StackBase) <= 0x2100) {
+                // Scan for __ArenaLo
+                ArenaLoRels.emplace_back(P);
+                ArenaLo = Imm;
+              }
+
+              HC.set(SrcReg, 0);
+            }
           }
         }
 
-        // Patch bl calls and absolute jumps
-        if (Desc.getOpcode() == ppcBL) {
+        if (Desc.getOpcode() == PPCI.BL) {
+          // Patch bl calls
           uint32_t Imm = getPPCImmediateOp(Inst);
           if (Imm != 0xffffffff) {
             int32_t Addr = SignExtend32(Imm << 2, 24);
             OrigCallAddrToInstFileOffs.insert(std::make_pair(Addr + VAIndex,
-              Relocation{uint32_t(VAIndex), uint32_t(FileIndex), R_PPC_REL24}));
+              Relocation{VAIndex, FileIndex, R_PPC_REL24}));
           }
-        } else if (Desc.getOpcode() == ppcBA) {
+
+        } else if (Desc.getOpcode() == PPCI.BA) {
+          // Patch absolute jumps
           uint32_t Imm = getPPCImmediateOp(Inst);
           if (Imm != 0xffffffff) {
             uint32_t Addr = Imm << 2;
             OrigCallAddrToInstFileOffs.insert(std::make_pair(Addr,
-              Relocation{uint32_t(VAIndex), uint32_t(FileIndex), R_PPC_ADDR24}));
+              Relocation{VAIndex, FileIndex, R_PPC_ADDR24}));
           }
         }
 
@@ -553,6 +738,10 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
       }
     }
   }
+
+  // Relocate best match result for _stack_end_
+  if (StackEnd)
+    StackEndRels.emplace_back(StackEndRel);
 }
 
 void DOLFile::patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr) {
@@ -782,8 +971,9 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   ScriptConfig->HasSections = true;
   Config->OFormatBinary = true;
   Config->InitialFileOffset = DolFile->getUnallocatedFileOffset();
+  uint32_t InitialAddr = DolFile->getStackEnd();
   Config->Strip = StripPolicy::All;
-  Config->OPreWrite = [&](uint8_t *BufData,
+  Config->OPreWrite = [&,InitialAddr](uint8_t *BufData,
       const std::vector<OutputSectionBase *> &OutputSections) {
 
     // Patch original calls
@@ -819,10 +1009,13 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     // and before the file buffer has been committed to disk
     DOLFile::Section *DataSec = nullptr;
 
+    uint64_t Dot = 0;
+
     // Fill in header information
     for (const OutputSectionBase *Sec : OutputSections) {
       if (!Sec->Offset)
         continue;
+      Dot = std::max(Dot, Sec->Addr + Sec->Size);
       if (Sec->getName() == ".sdata") {
         int SDataSecIdx = DolFile->getUnusedDataSectionIndex();
         if (SDataSecIdx == -1) {
@@ -866,6 +1059,12 @@ void LinkerDriver::link(opt::InputArgList &Args) {
         }
         DataSec->Length = (Sec->Addr - DataSec->Addr) + Sec->Size;
       }
+    }
+
+    // Relocate __ArenaLo and _stack_base
+    if (Dot > InitialAddr) {
+      uint32_t Delta = (Dot - InitialAddr + 255) & ~255;
+      DolFile->patchForGrowDelta(Delta);
     }
 
     // Write existing .dol buffer first
@@ -912,7 +1111,6 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     TextOut->AddrExpr = Align32Expr;
     DataOut->AddrExpr = Align32Expr;
 
-    uint32_t InitialAddr = DolFile->getUnallocatedAddressOffset();
     auto InitialStartExpr = [=](uint64_t) { return InitialAddr; };
 
     ScriptConfig->Commands.push_back(make_unique<SymbolAssignment>(".", InitialStartExpr));
