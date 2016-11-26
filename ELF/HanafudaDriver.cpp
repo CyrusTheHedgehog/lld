@@ -132,24 +132,54 @@ private:
   uint32_t ArenaLo = 0;
   bool DolphinSections = false;
 
+  static void BufOverflowErr(uint32_t Offset, uint32_t Size) {
+    std::string TheStr;
+    raw_string_ostream Str(TheStr);
+    Str <<  format("patch out of bounds [%u/%u] bytes", Offset, Size);
+    error(Str.str());
+  }
+
   struct Relocation {
     uint32_t Addr;
     uint32_t Offset;
     uint32_t Type;
 
     void patch(MemoryBufferRef MB, uint32_t Val) const {
+      const uint32_t BufSz = MB.getBuffer().size();
+      if (Offset >= BufSz) {
+        BufOverflowErr(Offset, BufSz);
+        return;
+      }
+      const uint8_t *Ptr = MB.getBuffer().bytes_begin() + Offset;
       uint32_t ActualType;
       if (Type == R_PPC_ADDR16_HA || Type == R_PPC_ADDR16_HI)
         ActualType = ((Val & 0xffff) >= 0x8000) ? R_PPC_ADDR16_HA : R_PPC_ADDR16_HI;
       else
         ActualType = Type;
 
-      elf::Target->relocateOne(
-        const_cast<uint8_t *>(MB.getBuffer().bytes_begin() + Offset), ActualType, Val);
+      uint32_t OldVal;
+      if (Config->Verbose) {
+        if ((Type - R_PPC_ADDR16) <= 3)
+          OldVal = read16be(Ptr);
+        else
+          OldVal = read32be(Ptr);
+      }
 
-      if (Config->Verbose)
-        outs() << format("Patched 0x%08X(0x%08X) to 0x%08X\n",
-                         Addr, Offset, Val);
+      elf::Target->relocateOne(const_cast<uint8_t *>(Ptr), ActualType, Val);
+
+      if (Config->Verbose) {
+        uint32_t NewVal;
+        const char *FmtStr;
+        if ((Type - R_PPC_ADDR16) <= 3) {
+          NewVal = read16be(Ptr);
+          FmtStr = "Patched 0x%08X(0x%08X) from 0x%04X to 0x%04X as %s\n";
+        } else {
+          NewVal = read32be(Ptr);
+          FmtStr = "Patched 0x%08X(0x%08X) from 0x%08X to 0x%08X as %s\n";
+        }
+        outs() << format(FmtStr, Addr, Offset, OldVal, NewVal,
+                         elf::toString(ActualType).c_str());
+      }
     }
   };
 
@@ -745,8 +775,13 @@ void DOLFile::scanForRelocations(LinkerDriver &Drv) {
 }
 
 void DOLFile::patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr) {
+  const uint32_t BufSz = MB.getBuffer().size();
   for (const std::pair<uint32_t, Relocation> &P :
        make_range(OrigCallAddrToInstFileOffs.equal_range(oldAddr))) {
+    if (P.second.Offset >= BufSz) {
+      BufOverflowErr(P.second.Offset, BufSz);
+      continue;
+    }
 
     // Make relocation PC-relative if needed
     int64_t Addr;
@@ -765,14 +800,15 @@ void DOLFile::patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr) 
         P.second.Type, Addr);
 
     if (Config->Verbose)
-      outs() << format("Patched 0x%08X(0x%08X) from 0x%08X to 0x%08X\n",
-                       P.second.Addr, P.second.Offset, oldAddr, newAddr);
+      outs() << format("Patched 0x%08X(0x%08X) from 0x%08X to 0x%08X as %s\n",
+                       P.second.Addr, P.second.Offset, oldAddr, newAddr,
+                       elf::toString(P.second.Type).c_str());
   }
 }
 
 bool link(ArrayRef<const char *> Args, bool CanExitEarly,
           raw_ostream &Error) {
-  HasError = false;
+  ErrorCount = false;
   ErrorOS = &Error;
   Argv0 = Args[0];
 
@@ -785,7 +821,7 @@ bool link(ArrayRef<const char *> Args, bool CanExitEarly,
 
   D.main(Args, CanExitEarly);
   freeArena();
-  return !HasError;
+  return !ErrorCount;
 }
 
 // This function is called on startup. We need this for LTO since
@@ -919,23 +955,18 @@ void LinkerDriver::main(ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
   inferMachineType();
   checkOptions(Args);
 
-  if (Config->EKind != ELF32BEKind) {
+  if (Config->EKind != ELF32BEKind)
     error("Hanafuda link only accepts ELF32BE kind");
-    return;
-  }
-  if (Config->EMachine != EM_PPC) {
+  if (Config->EMachine != EM_PPC)
     error("Hanafuda link only accepts EM_PPC machine");
-    return;
-  }
-  if (Config->OSABI != ELF::ELFOSABI_STANDALONE) {
+  if (Config->OSABI != ELF::ELFOSABI_STANDALONE)
     error("Hanafuda link only accepts ELFOSABI_STANDALONE");
+
+  if (ErrorCount)
     return;
-  }
 
   Config->SdaBase = DolFile->getSdataBase();
   Config->Sda2Base = DolFile->getSdata2Base();
-  if (HasError)
-    return;
 
   // Do actual link, merging base symbols with linked symbols
   link(Args);
@@ -1002,7 +1033,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
       DolFile->patchTargetAddressRelocations(OldSym->Value,
                                              NewSym->getVA<ELF32BE>(0));
     }
-    if (HasError)
+    if (ErrorCount)
       return;
 
     // I'm called after lld has assigned file offsets and VAs to new output sections,
@@ -1081,6 +1112,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     SdataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     SdataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     SdataOut->Commands.push_back(std::move(SdataIn));
+    SdataOut->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
 
     std::unique_ptr<OutputSectionCommand> Sdata2Out = make_unique<OutputSectionCommand>(".sdata2");
     std::unique_ptr<InputSectionDescription> Sdata2In = make_unique<InputSectionDescription>("*");
@@ -1088,6 +1120,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     Sdata2In->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     Sdata2In->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     Sdata2Out->Commands.push_back(std::move(Sdata2In));
+    Sdata2Out->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
 
     std::unique_ptr<OutputSectionCommand> TextOut = make_unique<OutputSectionCommand>(".htext");
     std::unique_ptr<InputSectionDescription> TextIn = make_unique<InputSectionDescription>("*");
@@ -1095,6 +1128,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     TextIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     TextIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     TextOut->Commands.push_back(std::move(TextIn));
+    TextOut->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
 
     std::unique_ptr<OutputSectionCommand> DataOut = make_unique<OutputSectionCommand>(".hdata");
     std::unique_ptr<InputSectionDescription> DataIn = make_unique<InputSectionDescription>("*");
@@ -1103,7 +1137,8 @@ void LinkerDriver::link(opt::InputArgList &Args) {
                                                                          ".bss"}));
     DataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     DataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
-    TextOut->Commands.push_back(std::move(DataIn));
+    DataOut->Commands.push_back(std::move(DataIn));
+    DataOut->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
 
     auto Align32Expr = [=](uint64_t Dot) { return (Dot + 31) & ~31; };
     Sdata2Out->AddrExpr = Align32Expr;
@@ -1168,7 +1203,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   if (Symtab.find(Config->Entry))
     Symtab.addUndefined(Config->Entry);
 
-  if (HasError)
+  if (ErrorCount)
     return; // There were duplicate symbols or incompatible files
 
   Symtab.scanUndefinedFlags();
@@ -1177,7 +1212,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   Symtab.scanVersionScript();
 
   Symtab.addCombinedLtoObject();
-  if (HasError)
+  if (ErrorCount)
     return;
 
   for (auto *Arg : Args.filtered(OPT_wrap))

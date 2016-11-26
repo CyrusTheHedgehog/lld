@@ -205,7 +205,7 @@ template <class ELFT> void Writer<ELFT>::run() {
     return;
   if (Config->OPreWrite) {
     Config->OPreWrite(Buffer->getBufferStart(), OutputSections);
-    if (HasError)
+    if (ErrorCount)
       return;
   }
   if (!Config->OFormatBinary) {
