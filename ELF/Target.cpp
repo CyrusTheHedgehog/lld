@@ -1002,25 +1002,22 @@ void PPCTargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
   case R_PPC_ADDR24:
   case R_PPC_REL24: {
     checkAlignment<4>(Loc, Val, Type);
-    uint32_t Inst = read32<E>(Loc) & ~0x3FFFFFC;
-    Inst |= Val & 0x3FFFFFC;
-    write32<E>(Loc, Inst);
+    const uint32_t Mask = 0x3FFFFFC;
+    write32<E>(Loc, (read32<E>(Loc) & ~Mask) | (Val & Mask));
     break;
   }
   case R_PPC_ADDR14:
   case R_PPC_REL14: {
     checkAlignment<4>(Loc, Val, Type);
-    uint32_t Inst = read32<E>(Loc) & ~0xFFFC;
-    Inst |= Val & 0xFFFC;
-    write32<E>(Loc, Inst);
+    const uint32_t Mask = 0xFFFC;
+    write32<E>(Loc, (read32<E>(Loc) & ~Mask) | (Val & Mask));
     break;
   }
   case R_PPC_EMB_SDA21: {
     // SDA21 relocation entry is offset one byte into instruction
     uint8_t *InstLoc = Loc - (E == llvm::support::big ? 1 : 0);
-    uint32_t Inst = read32<E>(InstLoc) & ~0x1FFFFF;
-    Inst |= Val & 0x1FFFFF;
-    write32<E>(InstLoc, Inst);
+    const uint32_t Mask = 0x1FFFFF;
+    write32<E>(InstLoc, (read32<E>(InstLoc) & ~Mask) | (Val & Mask));
     break;
   }
   default:
@@ -1170,11 +1167,11 @@ void PPC64TargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
   }
   case R_PPC64_ADDR16:
     checkInt<16>(Loc, Val, Type);
-    write16be(Loc, Val);
+    write16<E>(Loc, Val);
     break;
   case R_PPC64_ADDR16_DS:
     checkInt<16>(Loc, Val, Type);
-    write16be(Loc, (read16be(Loc) & 3) | (Val & ~3));
+    write16<E>(Loc, (read16<E>(Loc) & 3) | (Val & ~3));
     break;
   case R_PPC64_ADDR16_HA:
   case R_PPC64_REL16_HA:
@@ -1206,7 +1203,7 @@ void PPC64TargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
   case R_PPC64_ADDR32:
   case R_PPC64_REL32:
     checkInt<32>(Loc, Val, Type);
-    write32be(Loc, Val);
+    write32<E>(Loc, Val);
     break;
   case R_PPC64_ADDR64:
   case R_PPC64_REL64:
@@ -1216,7 +1213,7 @@ void PPC64TargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
   case R_PPC64_REL24: {
     uint32_t Mask = 0x03FFFFFC;
     checkInt<24>(Loc, Val, Type);
-    write32be(Loc, (read32be(Loc) & ~Mask) | (Val & Mask));
+    write32<E>(Loc, (read32<E>(Loc) & ~Mask) | (Val & Mask));
     break;
   }
   default:
