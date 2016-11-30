@@ -80,8 +80,8 @@ struct Configuration {
   llvm::StringRef Emulation;
   llvm::StringRef Fini;
   llvm::StringRef Init;
-  llvm::StringRef LtoAAPipeline;
-  llvm::StringRef LtoNewPmPasses;
+  llvm::StringRef LTOAAPipeline;
+  llvm::StringRef LTONewPmPasses;
   llvm::StringRef OutputFile;
   llvm::StringRef SoName;
   llvm::StringRef Sysroot;
@@ -98,6 +98,7 @@ struct Configuration {
   bool AsNeeded = false;
   bool Bsymbolic;
   bool BsymbolicFunctions;
+  bool ColorDiagnostics = false;
   bool Demangle = true;
   bool DisableVerify;
   bool EhFrameHdr;
@@ -114,12 +115,14 @@ struct Configuration {
   bool NoUndefinedVersion;
   bool Nostdlib;
   bool OFormatBinary;
+  bool OMagic;
   bool Pic;
   bool Pie;
   bool PrintGcSections;
   bool Rela;
   bool Relocatable;
   bool SaveTemps;
+  bool SingleRoRx;
   bool Shared;
   bool Static = false;
   bool SysvHash = true;
@@ -146,16 +149,16 @@ struct Configuration {
   uint16_t DefaultSymbolVersion = llvm::ELF::VER_NDX_GLOBAL;
   uint16_t EMachine = llvm::ELF::EM_NONE;
   uint64_t EntryAddr = 0;
-  uint64_t ErrorLimit = 20; // initialize it early so that error() won't complain
+  uint64_t ErrorLimit = 20;
   uint64_t ImageBase;
   uint64_t MaxPageSize;
   uint64_t SdaBase = ~0;
   uint64_t Sda2Base = ~0;
   uint64_t ZStackSize;
-  unsigned LtoPartitions;
-  unsigned LtoO;
+  unsigned LTOPartitions;
+  unsigned LTOO;
   unsigned Optimize;
-  unsigned ThinLtoJobs;
+  unsigned ThinLTOJobs;
 
   // Hanafuda additions
   std::function<void(uint8_t *,

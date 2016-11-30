@@ -108,16 +108,16 @@ template <class ELFT> void SymbolTable<ELFT>::addFile(InputFile *File) {
 // using LLVM functions and replaces bitcode symbols with the results.
 // Because all bitcode files that consist of a program are passed
 // to the compiler at once, it can do whole-program optimization.
-template <class ELFT> void SymbolTable<ELFT>::addCombinedLtoObject() {
+template <class ELFT> void SymbolTable<ELFT>::addCombinedLTOObject() {
   if (BitcodeFiles.empty())
     return;
 
   // Compile bitcode files and replace bitcode symbols.
-  Lto.reset(new BitcodeCompiler);
+  LTO.reset(new BitcodeCompiler);
   for (BitcodeFile *F : BitcodeFiles)
-    Lto->add(*F, &HanafudaPatches);
+    LTO->add(*F, &HanafudaPatches);
 
-  for (InputFile *File : Lto->compile()) {
+  for (InputFile *File : LTO->compile()) {
     ObjectFile<ELFT> *Obj = cast<ObjectFile<ELFT>>(File);
     DenseSet<CachedHashStringRef> DummyGroups;
     Obj->parse(DummyGroups);
@@ -236,14 +236,15 @@ SymbolTable<ELFT>::insert(StringRef Name, uint8_t Type, uint8_t Visibility,
 }
 
 template <class ELFT> Symbol *SymbolTable<ELFT>::addUndefined(StringRef Name) {
-  return addUndefined(Name, STB_GLOBAL, STV_DEFAULT, /*Type*/ 0,
+  return addUndefined(Name, /*IsLocal=*/false, STB_GLOBAL, STV_DEFAULT,
+                      /*Type*/ 0,
                       /*CanOmitFromDynSym*/ false, /*File*/ nullptr);
 }
 
 template <class ELFT>
-Symbol *SymbolTable<ELFT>::addUndefined(StringRef Name, uint8_t Binding,
-                                        uint8_t StOther, uint8_t Type,
-                                        bool CanOmitFromDynSym,
+Symbol *SymbolTable<ELFT>::addUndefined(StringRef Name, bool IsLocal,
+                                        uint8_t Binding, uint8_t StOther,
+                                        uint8_t Type, bool CanOmitFromDynSym,
                                         InputFile *File) {
   Symbol *S;
   bool WasInserted;
@@ -251,7 +252,7 @@ Symbol *SymbolTable<ELFT>::addUndefined(StringRef Name, uint8_t Binding,
       insert(Name, Type, StOther & 3, CanOmitFromDynSym, File);
   if (WasInserted) {
     S->Binding = Binding;
-    replaceBody<Undefined>(S, Name, StOther, Type, File);
+    replaceBody<Undefined>(S, Name, IsLocal, StOther, Type, File);
     return S;
   }
   if (Binding != STB_WEAK) {
@@ -378,8 +379,8 @@ Symbol *SymbolTable<ELFT>::addRegular(StringRef Name, uint8_t StOther,
                                     /*CanOmitFromDynSym*/ false, File);
   int Cmp = compareDefinedNonCommon(S, WasInserted, Binding);
   if (Cmp > 0)
-    replaceBody<DefinedRegular<ELFT>>(S, Name, StOther, Type, Value, Size,
-                                      Section, File);
+    replaceBody<DefinedRegular<ELFT>>(S, Name, /*IsLocal=*/false, StOther, Type,
+                                      Value, Size, Section, File);
   else if (Cmp == 0)
     reportDuplicate(S->body(), Section, Value);
   return S;
@@ -432,7 +433,8 @@ Symbol *SymbolTable<ELFT>::addBitcode(StringRef Name, uint8_t Binding,
       insert(Name, Type, StOther & 3, CanOmitFromDynSym, F);
   int Cmp = compareDefinedNonCommon(S, WasInserted, Binding);
   if (Cmp > 0)
-    replaceBody<DefinedRegular<ELFT>>(S, Name, StOther, Type, 0, 0, nullptr, F);
+    replaceBody<DefinedRegular<ELFT>>(S, Name, /*IsLocal=*/false, StOther, Type,
+                                      0, 0, nullptr, F);
   else if (Cmp == 0)
     reportDuplicate(S->body(), F);
   return S;

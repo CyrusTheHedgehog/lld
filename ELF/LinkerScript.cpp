@@ -21,6 +21,7 @@
 #include "Strings.h"
 #include "SymbolTable.h"
 #include "Symbols.h"
+#include "SyntheticSections.h"
 #include "Target.h"
 #include "Writer.h"
 #include "llvm/ADT/STLExtras.h"
@@ -489,6 +490,14 @@ template <class ELFT> void LinkerScript<ELFT>::process(BaseCommand &Base) {
   // updates the output section size.
   auto &ICmd = cast<InputSectionDescription>(Base);
   for (InputSectionData *ID : ICmd.Sections) {
+    // We tentatively added all synthetic sections at the beginning and removed
+    // empty ones afterwards (because there is no way to know whether they were
+    // going be empty or not other than actually running linker scripts.)
+    // We need to ignore remains of empty sections.
+    if (auto *Sec = dyn_cast<SyntheticSection<ELFT>>(ID))
+      if (Sec->empty())
+        continue;
+
     auto *IB = static_cast<InputSectionBase<ELFT> *>(ID);
     switchTo(IB->OutSec);
     if (auto *I = dyn_cast<InputSection<ELFT>>(IB))
@@ -566,7 +575,7 @@ template <class ELFT> void LinkerScript<ELFT>::adjustSectionsBeforeSorting() {
   // '.' is assigned to, but creating these section should not have any bad
   // consequeces and gives us a section to put the symbol in.
   uintX_t Flags = SHF_ALLOC;
-  uint32_t Type = 0;
+  uint32_t Type = SHT_NOBITS;
   for (const std::unique_ptr<BaseCommand> &Base : Opt.Commands) {
     auto *Cmd = dyn_cast<OutputSectionCommand>(Base.get());
     if (!Cmd)
@@ -650,6 +659,27 @@ void LinkerScript<ELFT>::placeOrphanSections() {
   // This loops creates or moves commands as needed so that they are in the
   // correct order.
   int CmdIndex = 0;
+
+  // As a horrible special case, skip the first . assignment if it is before any
+  // section. We do this because it is common to set a load address by starting
+  // the script with ". = 0xabcd" and the expectation is that every section is
+  // after that.
+  auto FirstSectionOrDotAssignment =
+      std::find_if(Opt.Commands.begin(), Opt.Commands.end(),
+                   [](const std::unique_ptr<BaseCommand> &Cmd) {
+                     if (isa<OutputSectionCommand>(*Cmd))
+                       return true;
+                     const auto *Assign = dyn_cast<SymbolAssignment>(Cmd.get());
+                     if (!Assign)
+                       return false;
+                     return Assign->Name == ".";
+                   });
+  if (FirstSectionOrDotAssignment != Opt.Commands.end()) {
+    CmdIndex = FirstSectionOrDotAssignment - Opt.Commands.begin();
+    if (isa<SymbolAssignment>(**FirstSectionOrDotAssignment))
+      ++CmdIndex;
+  }
+
   for (OutputSectionBase *Sec : *OutputSections) {
     StringRef Name = Sec->getName();
 
@@ -863,13 +893,15 @@ template <class ELFT> bool LinkerScript<ELFT>::hasPhdrsCommands() {
 }
 
 template <class ELFT>
-const OutputSectionBase *LinkerScript<ELFT>::getOutputSection(StringRef Name) {
+const OutputSectionBase *LinkerScript<ELFT>::getOutputSection(const Twine &Loc,
+                                                              StringRef Name) {
   static OutputSectionBase FakeSec("", 0, 0);
 
   for (OutputSectionBase *Sec : *OutputSections)
     if (Sec->getName() == Name)
       return Sec;
-  error("undefined section " + Name);
+
+  error(Loc + ": undefined section " + Name);
   return &FakeSec;
 }
 
@@ -1239,6 +1271,11 @@ void ScriptParser::readSearchDir() {
 
 void ScriptParser::readSections() {
   Opt.HasSections = true;
+  // -no-rosegment is used to avoid placing read only non-executable sections in
+  // their own segment. We do the same if SECTIONS command is present in linker
+  // script. See comment for computeFlags().
+  Config->SingleRoRx = true;
+
   expect("{");
   while (!Error && !consume("}")) {
     StringRef Tok = next();
@@ -1676,6 +1713,7 @@ Expr ScriptParser::readPrimary() {
     return readParenExpr();
 
   StringRef Tok = next();
+  std::string Location = currentLocation();
 
   if (Tok == "~") {
     Expr E = readPrimary();
@@ -1690,15 +1728,16 @@ Expr ScriptParser::readPrimary() {
   // https://sourceware.org/binutils/docs/ld/Builtin-Functions.html.
   if (Tok == "ADDR") {
     StringRef Name = readParenLiteral();
-    return {
-        [=](uint64_t Dot) { return ScriptBase->getOutputSection(Name)->Addr; },
-        [=] { return false; },
-        [=] { return ScriptBase->getOutputSection(Name); }};
+    return {[=](uint64_t Dot) {
+              return ScriptBase->getOutputSection(Location, Name)->Addr;
+            },
+            [=] { return false; },
+            [=] { return ScriptBase->getOutputSection(Location, Name); }};
   }
   if (Tok == "LOADADDR") {
     StringRef Name = readParenLiteral();
     return [=](uint64_t Dot) {
-      return ScriptBase->getOutputSection(Name)->getLMA();
+      return ScriptBase->getOutputSection(Location, Name)->getLMA();
     };
   }
   if (Tok == "ASSERT")
@@ -1755,7 +1794,7 @@ Expr ScriptParser::readPrimary() {
   if (Tok == "ALIGNOF") {
     StringRef Name = readParenLiteral();
     return [=](uint64_t Dot) {
-      return ScriptBase->getOutputSection(Name)->Addralign;
+      return ScriptBase->getOutputSection(Location, Name)->Addralign;
     };
   }
   if (Tok == "SIZEOF_HEADERS")
