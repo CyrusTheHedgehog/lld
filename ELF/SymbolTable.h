@@ -42,7 +42,7 @@ template <class ELFT> class SymbolTable {
 
 public:
   void addFile(InputFile *File);
-  void addCombinedLtoObject();
+  void addCombinedLTOObject();
 
   ArrayRef<Symbol *> getSymbols() const { return SymVector; }
   ArrayRef<ObjectFile<ELFT> *> getObjectFiles() const { return ObjectFiles; }
@@ -55,8 +55,9 @@ public:
                                    uint8_t Visibility = llvm::ELF::STV_HIDDEN);
 
   Symbol *addUndefined(StringRef Name);
-  Symbol *addUndefined(StringRef Name, uint8_t Binding, uint8_t StOther,
-                       uint8_t Type, bool CanOmitFromDynSym, InputFile *File);
+  Symbol *addUndefined(StringRef Name, bool IsLocal, uint8_t Binding,
+                       uint8_t StOther, uint8_t Type, bool CanOmitFromDynSym,
+                       InputFile *File);
 
   Symbol *addRegular(StringRef Name, uint8_t StOther, uint8_t Type,
                      uintX_t Value, uintX_t Size, uint8_t Binding,
@@ -141,7 +142,7 @@ private:
   llvm::Optional<llvm::StringMap<std::vector<SymbolBody *>>> DemangledSyms;
 
   // For LTO.
-  std::unique_ptr<BitcodeCompiler> Lto;
+  std::unique_ptr<BitcodeCompiler> LTO;
 };
 
 template <class ELFT> struct Symtab { static SymbolTable<ELFT> *X; };

@@ -22,6 +22,7 @@
 
 #include "llvm/Support/Compression.h"
 #include "llvm/Support/Endian.h"
+#include <mutex>
 
 using namespace llvm;
 using namespace llvm::ELF;
@@ -79,6 +80,12 @@ InputSectionBase<ELFT>::InputSectionBase(elf::ObjectFile<ELFT> *File,
   if (V > UINT32_MAX)
     fatal(toString(File) + ": section sh_addralign is too large");
   Alignment = V;
+
+  // If it is not a mergeable section, overwrite the flag so that the flag
+  // is consistent with the class. This inconsistency could occur when
+  // string merging is disabled using -O0 flag.
+  if (!Config->Relocatable && !isa<MergeInputSection<ELFT>>(this))
+    this->Flags &= ~(SHF_MERGE | SHF_STRINGS);
 }
 
 template <class ELFT>
@@ -160,6 +167,8 @@ InputSectionBase<ELFT>::getRawCompressedData(ArrayRef<uint8_t> Data) {
   return {Data.slice(sizeof(*Hdr)), read64be(Hdr->Size)};
 }
 
+// Uncompress section contents. Note that this function is called
+// from parallel_for_each, so it must be thread-safe.
 template <class ELFT> void InputSectionBase<ELFT>::uncompress() {
   if (!zlib::isAvailable())
     fatal(toString(this) +
@@ -179,7 +188,12 @@ template <class ELFT> void InputSectionBase<ELFT>::uncompress() {
     std::tie(Buf, Size) = getRawCompressedData(Data);
 
   // Uncompress Buf.
-  char *OutputBuf = BAlloc.Allocate<char>(Size);
+  char *OutputBuf;
+  {
+    static std::mutex Mu;
+    std::lock_guard<std::mutex> Lock(Mu);
+    OutputBuf = BAlloc.Allocate<char>(Size);
+  }
   if (zlib::uncompress(toStringRef(Buf), OutputBuf, Size) != zlib::StatusOK)
     fatal(toString(this) + ": error while uncompressing section");
   Data = ArrayRef<uint8_t>((uint8_t *)OutputBuf, Size);
@@ -415,7 +429,7 @@ static typename ELFT::uint getSymVA(uint32_t Type, typename ELFT::uint A,
     // should be initialized by 'page address'. This address is high 16-bits
     // of sum the symbol's value and the addend.
     return In<ELFT>::MipsGot->getVA() +
-           In<ELFT>::MipsGot->getPageEntryOffset(Body.getVA<ELFT>(A)) -
+           In<ELFT>::MipsGot->getPageEntryOffset(Body, A) -
            In<ELFT>::MipsGot->getGp();
   case R_MIPS_GOT_OFF:
   case R_MIPS_GOT_OFF32:
@@ -719,22 +733,20 @@ static size_t findNull(ArrayRef<uint8_t> A, size_t EntSize) {
 // Split SHF_STRINGS section. Such section is a sequence of
 // null-terminated strings.
 template <class ELFT>
-std::vector<SectionPiece>
-MergeInputSection<ELFT>::splitStrings(ArrayRef<uint8_t> Data, size_t EntSize) {
-  std::vector<SectionPiece> V;
+void MergeInputSection<ELFT>::splitStrings(ArrayRef<uint8_t> Data,
+                                           size_t EntSize) {
   size_t Off = 0;
-  bool IsAlloca = this->Flags & SHF_ALLOC;
+  bool IsAlloc = this->Flags & SHF_ALLOC;
   while (!Data.empty()) {
     size_t End = findNull(Data, EntSize);
     if (End == StringRef::npos)
       fatal(toString(this) + ": string is not null terminated");
     size_t Size = End + EntSize;
-    V.emplace_back(Off, !IsAlloca);
+    Pieces.emplace_back(Off, !IsAlloc);
     Hashes.push_back(hash_value(toStringRef(Data.slice(0, Size))));
     Data = Data.slice(Size);
     Off += Size;
   }
-  return V;
 }
 
 // Returns I'th piece's data.
@@ -750,18 +762,15 @@ CachedHashStringRef MergeInputSection<ELFT>::getData(size_t I) const {
 // Split non-SHF_STRINGS section. Such section is a sequence of
 // fixed size records.
 template <class ELFT>
-std::vector<SectionPiece>
-MergeInputSection<ELFT>::splitNonStrings(ArrayRef<uint8_t> Data,
-                                         size_t EntSize) {
-  std::vector<SectionPiece> V;
+void MergeInputSection<ELFT>::splitNonStrings(ArrayRef<uint8_t> Data,
+                                              size_t EntSize) {
   size_t Size = Data.size();
   assert((Size % EntSize) == 0);
-  bool IsAlloca = this->Flags & SHF_ALLOC;
+  bool IsAlloc = this->Flags & SHF_ALLOC;
   for (unsigned I = 0, N = Size; I != N; I += EntSize) {
     Hashes.push_back(hash_value(toStringRef(Data.slice(I, EntSize))));
-    V.emplace_back(I, !IsAlloca);
+    Pieces.emplace_back(I, !IsAlloc);
   }
-  return V;
 }
 
 template <class ELFT>
@@ -770,13 +779,19 @@ MergeInputSection<ELFT>::MergeInputSection(elf::ObjectFile<ELFT> *F,
                                            StringRef Name)
     : InputSectionBase<ELFT>(F, Header, Name, InputSectionBase<ELFT>::Merge) {}
 
+// This function is called after we obtain a complete list of input sections
+// that need to be linked. This is responsible to split section contents
+// into small chunks for further processing.
+//
+// Note that this function is called from parallel_for_each. This must be
+// thread-safe (i.e. no memory allocation from the pools).
 template <class ELFT> void MergeInputSection<ELFT>::splitIntoPieces() {
   ArrayRef<uint8_t> Data = this->Data;
   uintX_t EntSize = this->Entsize;
   if (this->Flags & SHF_STRINGS)
-    this->Pieces = splitStrings(Data, EntSize);
+    splitStrings(Data, EntSize);
   else
-    this->Pieces = splitNonStrings(Data, EntSize);
+    splitNonStrings(Data, EntSize);
 
   if (Config->GcSections && (this->Flags & SHF_ALLOC))
     for (uintX_t Off : LiveOffsets)

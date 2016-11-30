@@ -39,6 +39,9 @@ def allow_multiple_definition: F<"allow-multiple-definition">,
 def as_needed: F<"as-needed">,
   HelpText<"Only set DT_NEEDED for shared libraries if used">;
 
+def color_diagnostics: S<"color-diagnostics">,
+  HelpText<"Use colors in diagnostics">;
+
 def disable_new_dtags: F<"disable-new-dtags">,
   HelpText<"Disable new dynamic tags">;
 
@@ -121,6 +124,9 @@ def nostdlib: F<"nostdlib">,
 def no_as_needed: F<"no-as-needed">,
   HelpText<"Always DT_NEEDED for shared libraries">;
 
+def no_color_diagnostics: F<"no-color-diagnostics">,
+  HelpText<"Do not use colors in diagnostics">;
+
 def no_demangle: F<"no-demangle">,
   HelpText<"Do not demangle symbol names">;
 
@@ -141,6 +147,8 @@ def noinhibit_exec: F<"noinhibit-exec">,
 
 def nopie: F<"nopie">, HelpText<"Do not create a position independent executable">;
 
+def no_rosegment: F<"no-rosegment">, HelpText<"Do not put read-only non-executable sections in their own segment">;
+
 def no_undefined: F<"no-undefined">,
   HelpText<"Report unresolved symbols even if the linker is creating a shared library">;
 
@@ -152,6 +160,9 @@ def o: JoinedOrSeparate<["-"], "o">, MetaVarName<"<path>">,
 
 def oformat: Separate<["--"], "oformat">, MetaVarName<"<format>">,
   HelpText<"Specify the binary format for the output object file">;
+
+def omagic: F<"omagic">, MetaVarName<"<magic>">,
+  HelpText<"Set the text and data sections to be readable and writable">;
 
 def pie: F<"pie">, HelpText<"Create a position independent executable">;
 
@@ -242,6 +253,7 @@ def alias_Bstatic_dn: F<"dn">, Alias<Bstatic>;
 def alias_Bstatic_non_shared: F<"non_shared">, Alias<Bstatic>;
 def alias_Bstatic_static: F<"static">, Alias<Bstatic>;
 def alias_L__library_path: J<"library-path=">, Alias<L>;
+def alias_color_diagnostics: J<"color-diagnostics=">, Alias<color_diagnostics>;
 def alias_discard_all_x: Flag<["-"], "x">, Alias<discard_all>;
 def alias_discard_locals_X: Flag<["-"], "X">, Alias<discard_locals>;
 def alias_dynamic_list: J<"dynamic-list=">, Alias<dynamic_list>;
@@ -256,6 +268,7 @@ def alias_format_b: S<"b">, Alias<format>;
 def alias_hash_style_hash_style: J<"hash-style=">, Alias<hash_style>;
 def alias_init_init: J<"init=">, Alias<init>;
 def alias_l__library: J<"library=">, Alias<l>;
+def alias_omagic: Flag<["-"], "N">, Alias<omagic>;
 def alias_o_output: Joined<["--"], "output=">, Alias<o>;
 def alias_o_output2 : Separate<["--"], "output">, Alias<o>;
 def alias_pie_pic_executable: F<"pic-executable">, Alias<pie>;
