@@ -1211,7 +1211,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   Symtab.scanDynamicList();
   Symtab.scanVersionScript();
 
-  Symtab.addCombinedLtoObject();
+  Symtab.addCombinedLTOObject();
   if (ErrorCount)
     return;
 
