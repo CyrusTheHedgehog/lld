@@ -1001,7 +1001,6 @@ void PPCTargetInfo<ELFT>::relocateOne(uint8_t *Loc, uint32_t Type,
     break;
   case R_PPC_ADDR24:
   case R_PPC_REL24: {
-    checkInt<24>(Loc, Val, Type);
     checkAlignment<4>(Loc, Val, Type);
     uint32_t Inst = read32<E>(Loc) & ~0x3FFFFFC;
     Inst |= Val & 0x3FFFFFC;
