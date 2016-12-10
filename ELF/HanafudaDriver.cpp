@@ -19,9 +19,11 @@
 #include "Strings.h"
 #include "SymbolTable.h"
 #include "Target.h"
+#include "Threads.h"
 #include "Writer.h"
 #include "lld/Config/Version.h"
 #include "lld/Driver/Driver.h"
+#include "lld/Support/Memory.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/CommandLine.h"
@@ -896,6 +898,57 @@ getZOptionValue(opt::InputArgList &Args, StringRef Key, uint64_t Default) {
   return Default;
 }
 
+// Parse -z max-page-size=<value>. The default value is defined by
+// each target.
+static uint64_t getMaxPageSize(opt::InputArgList &Args) {
+  uint64_t Val =
+      getZOptionValue(Args, "max-page-size", elf::Target->DefaultMaxPageSize);
+  if (!isPowerOf2_64(Val))
+    error("max-page-size: value isn't a power of 2");
+  return Val;
+}
+
+// Parses -image-base option.
+static uint64_t getImageBase(opt::InputArgList &Args) {
+  // Use default if no -image-base option is given.
+  // Because we are using "Target" here, this function
+  // has to be called after the variable is initialized.
+  auto *Arg = Args.getLastArg(OPT_image_base);
+  if (!Arg)
+    return Config->Pic ? 0 : elf::Target->DefaultImageBase;
+
+  StringRef S = Arg->getValue();
+  uint64_t V;
+  if (S.getAsInteger(0, V)) {
+    error("-image-base: number expected, but got " + S);
+    return 0;
+  }
+  if ((V % Config->MaxPageSize) != 0)
+    warn("-image-base: address isn't multiple of page size: " + S);
+  return V;
+}
+
+// Parses -sda-base options.
+static std::pair<uint64_t, uint64_t> getSdaBases(opt::InputArgList &Args) {
+  // If argument not given or invalid, use ~0 value; triggering
+  // midpoint calculation in the first matching small output section.
+  auto CheckSdaArg = [](opt::Arg *Arg) -> uint64_t {
+    if (Arg) {
+      StringRef S = Arg->getValue();
+      uint64_t V;
+      if (S.getAsInteger(0, V))
+        error(Arg->getOption().getPrefixedName() +
+              ": number expected, but got " + S);
+      else
+        return V;
+    }
+    return ~0;
+  };
+
+  return std::make_pair(CheckSdaArg(Args.getLastArg(OPT_sda_base)),
+                        CheckSdaArg(Args.getLastArg(OPT_sda2_base)));
+}
+
 void LinkerDriver::main(ArrayRef<const char *> ArgsArr, bool CanExitEarly) {
   ELFOptTable Parser;
   opt::InputArgList Args = Parser.parse(ArgsArr.slice(1));
@@ -1118,7 +1171,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     SdataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     SdataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     SdataOut->Commands.push_back(std::move(SdataIn));
-    SdataOut->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
+    SdataOut->Commands.push_back(make_unique<BytesDataCommand>([](uint64_t){return 0;}, 4));
 
     std::unique_ptr<OutputSectionCommand> Sdata2Out = make_unique<OutputSectionCommand>(".sdata2");
     std::unique_ptr<InputSectionDescription> Sdata2In = make_unique<InputSectionDescription>("*");
@@ -1126,7 +1179,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     Sdata2In->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     Sdata2In->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     Sdata2Out->Commands.push_back(std::move(Sdata2In));
-    Sdata2Out->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
+    Sdata2Out->Commands.push_back(make_unique<BytesDataCommand>([](uint64_t){return 0;}, 4));
 
     std::unique_ptr<OutputSectionCommand> TextOut = make_unique<OutputSectionCommand>(".htext");
     std::unique_ptr<InputSectionDescription> TextIn = make_unique<InputSectionDescription>("*");
@@ -1134,7 +1187,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     TextIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     TextIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     TextOut->Commands.push_back(std::move(TextIn));
-    TextOut->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
+    TextOut->Commands.push_back(make_unique<BytesDataCommand>([](uint64_t){return 0;}, 4));
 
     std::unique_ptr<OutputSectionCommand> DataOut = make_unique<OutputSectionCommand>(".hdata");
     std::unique_ptr<InputSectionDescription> DataIn = make_unique<InputSectionDescription>("*");
@@ -1144,7 +1197,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     DataIn->SectionPatterns.back().SortOuter = SortSectionPolicy::None;
     DataIn->SectionPatterns.back().SortInner = SortSectionPolicy::None;
     DataOut->Commands.push_back(std::move(DataIn));
-    DataOut->Commands.push_back(make_unique<BytesDataCommand>(0, 4));
+    DataOut->Commands.push_back(make_unique<BytesDataCommand>([](uint64_t){return 0;}, 4));
 
     auto Align32Expr = [=](uint64_t Dot) { return (Dot + 31) & ~31; };
     Sdata2Out->AddrExpr = Align32Expr;
@@ -1162,59 +1215,50 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   }
 
   // Proceed with standard linker flow
-  std::unique_ptr<TargetInfo> TI(createTarget());
-  elf::Target = TI.get();
-  LinkerScript<ELF32BE> LS;
-  ScriptBase = Script<ELF32BE>::X = &LS;
+  using ELFT = ELF32BE;
+  elf::Target = createTarget();
+  ScriptBase = Script<ELFT>::X = make<LinkerScript<ELFT>>();
 
-  Config->Rela = false;
-  Config->Mips64EL = false;
+  Config->Rela =
+      ELFT::Is64Bits || Config->EMachine == EM_X86_64 || Config->MipsN32Abi;
+  Config->Mips64EL =
+      (Config->EMachine == EM_MIPS && Config->EKind == ELF64LEKind);
+  Config->MaxPageSize = getMaxPageSize(Args);
+  Config->ImageBase = getImageBase(Args);
+  std::tie(Config->SdaBase, Config->Sda2Base) = getSdaBases(Args);
 
   // Default output filename is "a.out" by the Unix tradition.
   if (Config->OutputFile.empty())
     Config->OutputFile = "a.out";
 
+  // Use default entry point name if no name was given via the command
+  // line nor linker scripts. For some reason, MIPS entry point name is
+  // different from others.
+  Config->WarnMissingEntry = (!Config->Entry.empty() || !Config->Shared);
+  if (Config->Entry.empty() && !Config->Relocatable)
+    Config->Entry = (Config->EMachine == EM_MIPS) ? "__start" : "_start";
+
   // Handle --trace-symbol.
   for (auto *Arg : Args.filtered(OPT_trace_symbol))
     Symtab.trace(Arg->getValue());
 
-  // Initialize Config->MaxPageSize. The default value is defined by
-  // the target, but it can be overriden using the option.
-  Config->MaxPageSize =
-      getZOptionValue(Args, "max-page-size", elf::Target->MaxPageSize);
-  if (!isPowerOf2_64(Config->MaxPageSize))
-    error("max-page-size: value isn't a power of 2");
-
-  // Add all files to the symbol table. After this, the symbol table
-  // contains all known names except a few linker-synthesized symbols.
+  // Add all files to the symbol table. This will add almost all
+  // symbols that we need to the symbol table.
   for (InputFile *F : Files)
     Symtab.addFile(F);
 
-  // Add the start symbol.
-  // It initializes either Config->Entry or Config->EntryAddr.
-  // Note that AMDGPU binaries have no entries.
-  if (!Config->Entry.empty()) {
-    // It is either "-e <addr>" or "-e <symbol>".
-    if (!Config->Entry.getAsInteger(0, Config->EntryAddr))
-      Config->Entry = "";
-  } else if (!Config->Shared && !Config->Relocatable &&
-             Config->EMachine != EM_AMDGPU) {
-    // -e was not specified. Use the default start symbol name
-    // if it is resolvable.
-    Config->Entry = (Config->EMachine == EM_MIPS) ? "__start" : "_start";
-  }
-
-  // If an object file defining the entry symbol is in an archive file,
-  // extract the file now.
+  // If an entry symbol is in a static archive, pull out that file now
+  // to complete the symbol table. After this, no new names except a
+  // few linker-synthesized ones will be added to the symbol table.
   if (Symtab.find(Config->Entry))
     Symtab.addUndefined(Config->Entry);
 
+  // Return if there were name resolution errors.
   if (ErrorCount)
-    return; // There were duplicate symbols or incompatible files
+    return;
 
   Symtab.scanUndefinedFlags();
   Symtab.scanShlibUndefined();
-  Symtab.scanDynamicList();
   Symtab.scanVersionScript();
 
   Symtab.addCombinedLTOObject();
@@ -1227,33 +1271,34 @@ void LinkerDriver::link(opt::InputArgList &Args) {
   // Now that we have a complete list of input files.
   // Beyond this point, no new files are added.
   // Aggregate all input sections into one place.
-  for (elf::ObjectFile<ELF32BE> *F : Symtab.getObjectFiles())
-    for (InputSectionBase<ELF32BE> *S : F->getSections())
-      if (S && S != &InputSection<ELF32BE>::Discarded)
+  for (elf::ObjectFile<ELFT> *F : Symtab.getObjectFiles())
+    for (InputSectionBase<ELFT> *S : F->getSections())
+      if (S && S != &InputSection<ELFT>::Discarded)
         Symtab.Sections.push_back(S);
   for (BinaryFile *F : Symtab.getBinaryFiles())
     for (InputSectionData *S : F->getSections())
-      Symtab.Sections.push_back(cast<InputSection<ELF32BE>>(S));
+      Symtab.Sections.push_back(cast<InputSection<ELFT>>(S));
 
   // Do size optimizations: garbage collection and identical code folding.
   if (Config->GcSections)
-    markLive<ELF32BE>();
+    markLive<ELFT>();
   if (Config->ICF)
-    doIcf<ELF32BE>();
+    doIcf<ELFT>();
 
   // MergeInputSection::splitIntoPieces needs to be called before
   // any call of MergeInputSection::getOffset. Do that.
-  for (InputSectionBase<ELF32BE> *S : Symtab.Sections) {
-    if (!S->Live)
-      continue;
-    if (S->Compressed)
-      S->uncompress();
-    if (auto *MS = dyn_cast<MergeInputSection<ELF32BE>>(S))
-      MS->splitIntoPieces();
-  }
+  forEach(Symtab.Sections.begin(), Symtab.Sections.end(),
+          [](InputSectionBase<ELFT> *S) {
+            if (!S->Live)
+              return;
+            if (S->Compressed)
+              S->uncompress();
+            if (auto *MS = dyn_cast<MergeInputSection<ELFT>>(S))
+              MS->splitIntoPieces();
+          });
 
   // Write the result to the file.
-  writeResult<ELF32BE>();
+  writeResult<ELFT>();
 }
 
 }
