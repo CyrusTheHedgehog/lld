@@ -384,13 +384,9 @@ template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::End;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::End2;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsGpDisp;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsLocalGp;
-<<<<<<< HEAD
-template <class ELFT> SymbolBody *ElfSym<ELFT>::MipsGp;
+template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsGp;
 template <class ELFT> DefinedSynthetic<ELFT> *ElfSym<ELFT>::SdaBase;
 template <class ELFT> DefinedSynthetic<ELFT> *ElfSym<ELFT>::Sda2Base;
-=======
-template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsGp;
->>>>>>> master
 
 // A real symbol object, SymbolBody, is usually stored within a Symbol. There's
 // always one Symbol for each symbol name. The resolver updates the SymbolBody
