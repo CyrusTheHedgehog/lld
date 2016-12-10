@@ -421,10 +421,16 @@ public:
     StackBase += Delta;
     StackEnd += Delta;
     ArenaLo += Delta;
+    if (Config->Verbose)
+      outs() << "Patching _stack_base_\n";
     for (const RelocationPair &Rel : StackBaseRels)
       Rel.patch(MB, StackBase);
+    if (Config->Verbose)
+      outs() << "Patching _stack_end_\n";
     for (const RelocationPair &Rel : StackEndRels)
       Rel.patch(MB, StackEnd);
+    if (Config->Verbose)
+      outs() << "Patching __ArenaLo\n";
     for (const RelocationPair &Rel : ArenaLoRels)
       Rel.patch(MB, ArenaLo);
   }
