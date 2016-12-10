@@ -117,6 +117,12 @@ public:
   // True if this symbol is referenced by 32-bit GOT relocations.
   unsigned Is32BitMipsGot : 1;
 
+  // True if this symbol is in the Iplt sub-section of the Plt.
+  unsigned IsInIplt : 1;
+
+  // True if this symbol is in the Igot sub-section of the .got.plt or .got.
+  unsigned IsInIgot : 1;
+
   // The following fields have the same meaning as the ELF symbol attributes.
   uint8_t Type;    // symbol type
   uint8_t StOther; // st_other field value
@@ -362,7 +368,7 @@ template <class ELFT> struct ElfSym {
   // The content for _gp_disp/__gnu_local_gp symbols for MIPS target.
   static DefinedRegular<ELFT> *MipsGpDisp;
   static DefinedRegular<ELFT> *MipsLocalGp;
-  static SymbolBody *MipsGp;
+  static DefinedRegular<ELFT> *MipsGp;
 
   // The content for _SDA_BASE_ and _SDA2_BASE_ symbols.
   static DefinedSynthetic<ELFT> *SdaBase;
@@ -378,9 +384,13 @@ template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::End;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::End2;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsGpDisp;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsLocalGp;
+<<<<<<< HEAD
 template <class ELFT> SymbolBody *ElfSym<ELFT>::MipsGp;
 template <class ELFT> DefinedSynthetic<ELFT> *ElfSym<ELFT>::SdaBase;
 template <class ELFT> DefinedSynthetic<ELFT> *ElfSym<ELFT>::Sda2Base;
+=======
+template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsGp;
+>>>>>>> master
 
 // A real symbol object, SymbolBody, is usually stored within a Symbol. There's
 // always one Symbol for each symbol name. The resolver updates the SymbolBody
@@ -415,6 +425,9 @@ struct Symbol {
 
   // True if this symbol is specified by --trace-symbol option.
   unsigned Traced : 1;
+
+  // This symbol version was found in a version script.
+  unsigned InVersionScript : 1;
 
   bool includeInDynsym() const;
   bool isWeak() const { return Binding == llvm::ELF::STB_WEAK; }

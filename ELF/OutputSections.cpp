@@ -11,12 +11,12 @@
 #include "Config.h"
 #include "EhFrame.h"
 #include "LinkerScript.h"
-#include "Memory.h"
 #include "Strings.h"
 #include "SymbolTable.h"
 #include "SyntheticSections.h"
 #include "Target.h"
-#include "lld/Core/Parallel.h"
+#include "Threads.h"
+#include "lld/Support/Memory.h"
 #include "llvm/Support/Dwarf.h"
 #include "llvm/Support/MD5.h"
 #include "llvm/Support/MathExtras.h"
@@ -254,10 +254,7 @@ template <class ELFT> void OutputSection<ELFT>::writeTo(uint8_t *Buf) {
     fill(Buf, this->Size, Filler);
 
   auto Fn = [=](InputSection<ELFT> *IS) { IS->writeTo(Buf); };
-  if (Config->Threads)
-    parallel_for_each(Sections.begin(), Sections.end(), Fn);
-  else
-    std::for_each(Sections.begin(), Sections.end(), Fn);
+  forEach(Sections.begin(), Sections.end(), Fn);
 
   // Linker scripts may have BYTE()-family commands with which you
   // can write arbitrary bytes to the output. Process them if any.

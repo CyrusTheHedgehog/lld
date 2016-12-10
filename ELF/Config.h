@@ -88,7 +88,6 @@ struct Configuration {
   std::string RPath;
   std::vector<VersionDefinition> VersionDefinitions;
   std::vector<llvm::StringRef> AuxiliaryList;
-  std::vector<llvm::StringRef> DynamicList;
   std::vector<llvm::StringRef> SearchPaths;
   std::vector<llvm::StringRef> Undefined;
   std::vector<SymbolVersion> VersionScriptGlobals;
@@ -131,6 +130,7 @@ struct Configuration {
   bool Trace;
   bool Verbose;
   bool WarnCommon;
+  bool WarnMissingEntry;
   bool ZCombreloc;
   bool ZExecstack;
   bool ZNodelete;
@@ -148,7 +148,6 @@ struct Configuration {
   ELFKind EKind = ELFNoneKind;
   uint16_t DefaultSymbolVersion = llvm::ELF::VER_NDX_GLOBAL;
   uint16_t EMachine = llvm::ELF::EM_NONE;
-  uint64_t EntryAddr = 0;
   uint64_t ErrorLimit = 20;
   uint64_t ImageBase;
   uint64_t MaxPageSize;

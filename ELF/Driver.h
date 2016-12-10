@@ -70,7 +70,6 @@ enum {
 
 void printHelp(const char *Argv0);
 std::vector<uint8_t> parseHexstring(StringRef S);
-void parseDynamicList(MemoryBufferRef MB);
 
 std::string createResponseFile(const llvm::opt::InputArgList &Args);
 

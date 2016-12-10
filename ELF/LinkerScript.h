@@ -66,6 +66,8 @@ void readLinkerScript(MemoryBufferRef MB);
 // Parses a version script.
 void readVersionScript(MemoryBufferRef MB);
 
+void readDynamicList(MemoryBufferRef MB);
+
 // This enum is used to implement linker script SECTIONS command.
 // https://sourceware.org/binutils/docs/ld/SECTIONS.html#SECTIONS
 enum SectionsCommandKind {
@@ -124,6 +126,7 @@ struct OutputSectionCommand : BaseCommand {
   std::vector<StringRef> Phdrs;
   uint32_t Filler = 0;
   ConstraintKind Constraint = ConstraintKind::NoConstraint;
+  std::string Location;
 };
 
 // This struct represents one section match pattern in SECTIONS() command.
@@ -165,12 +168,12 @@ struct AssertCommand : BaseCommand {
 
 // Represents BYTE(), SHORT(), LONG(), or QUAD().
 struct BytesDataCommand : BaseCommand {
-  BytesDataCommand(uint64_t Data, unsigned Size)
-      : BaseCommand(BytesDataKind), Data(Data), Size(Size) {}
+  BytesDataCommand(Expr E, unsigned Size)
+      : BaseCommand(BytesDataKind), Expression(E), Size(Size) {}
 
   static bool classof(const BaseCommand *C);
 
-  uint64_t Data;
+  Expr Expression;
   unsigned Offset;
   unsigned Size;
 };
@@ -268,7 +271,7 @@ private:
   ScriptConfiguration &Opt = *ScriptConfig;
 
   std::vector<size_t> getPhdrIndices(StringRef SectionName);
-  size_t getPhdrIndex(StringRef PhdrName);
+  size_t getPhdrIndex(const Twine &Loc, StringRef PhdrName);
 
   uintX_t Dot;
   uintX_t LMAOffset = 0;

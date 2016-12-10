@@ -14,14 +14,14 @@
 #include "InputFiles.h"
 #include "InputSection.h"
 #include "LinkerScript.h"
-#include "Memory.h"
 #include "Strings.h"
 #include "SymbolTable.h"
 #include "Target.h"
+#include "Threads.h"
 #include "Writer.h"
 #include "lld/Config/Version.h"
-#include "lld/Core/Parallel.h"
 #include "lld/Driver/Driver.h"
+#include "lld/Support/Memory.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Support/CommandLine.h"
@@ -48,12 +48,9 @@ bool elf::link(ArrayRef<const char *> Args, bool CanExitEarly,
   ErrorOS = &Error;
   Argv0 = Args[0];
 
-  Configuration C;
-  LinkerDriver D;
-  ScriptConfiguration SC;
-  Config = &C;
-  Driver = &D;
-  ScriptConfig = &SC;
+  Config = make<Configuration>();
+  Driver = make<LinkerDriver>();
+  ScriptConfig = make<ScriptConfiguration>();
 
   Driver->main(Args, CanExitEarly);
   freeArena();
@@ -241,9 +238,6 @@ static void checkOptions(opt::InputArgList &Args) {
   // table which is a relatively new feature.
   if (Config->EMachine == EM_MIPS && Config->GnuHash)
     error("the .gnu.hash section is not compatible with the MIPS target.");
-
-  if (Config->EMachine == EM_AMDGPU && !Config->Entry.empty())
-    error("-e option is not valid for AMDGPU.");
 
   if (Config->Pie && Config->Shared)
     error("-shared and -pie may not be used together");
@@ -440,6 +434,8 @@ static bool getArg(opt::InputArgList &Args, unsigned K1, unsigned K2,
 }
 
 static DiscardPolicy getDiscardOption(opt::InputArgList &Args) {
+  if (Config->Relocatable)
+    return DiscardPolicy::None;
   auto *Arg =
       Args.getLastArg(OPT_discard_all, OPT_discard_locals, OPT_discard_none);
   if (!Arg)
@@ -535,7 +531,6 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   Config->BsymbolicFunctions = Args.hasArg(OPT_Bsymbolic_functions);
   Config->Demangle = getArg(Args, OPT_demangle, OPT_no_demangle, true);
   Config->DisableVerify = Args.hasArg(OPT_disable_verify);
-  Config->Discard = getDiscardOption(Args);
   Config->EhFrameHdr = Args.hasArg(OPT_eh_frame_hdr);
   Config->EnableNewDtags = !Args.hasArg(OPT_disable_new_dtags);
   Config->ExportDynamic = Args.hasArg(OPT_export_dynamic);
@@ -550,6 +545,7 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   Config->Pie = getArg(Args, OPT_pie, OPT_nopie, false);
   Config->PrintGcSections = Args.hasArg(OPT_print_gc_sections);
   Config->Relocatable = Args.hasArg(OPT_relocatable);
+  Config->Discard = getDiscardOption(Args);
   Config->SaveTemps = Args.hasArg(OPT_save_temps);
   Config->SingleRoRx = Args.hasArg(OPT_no_rosegment);
   Config->Shared = Args.hasArg(OPT_shared);
@@ -594,6 +590,13 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
   Config->SortSection = getSortKind(Args);
   Config->Target2 = getTarget2Option(Args);
   Config->UnresolvedSymbols = getUnresolvedSymbolOption(Args);
+
+  // --omagic is an option to create old-fashioned executables in which
+  // .text segments are writable. Today, the option is still in use to
+  // create special-purpose programs such as boot loaders. It doesn't
+  // make sense to create PT_GNU_RELRO for such executables.
+  if (Config->OMagic)
+    Config->ZRelro = false;
 
   if (!Config->Relocatable)
     Config->Strip = getStripOption(Args);
@@ -643,14 +646,24 @@ void LinkerDriver::readConfigs(opt::InputArgList &Args) {
 
   if (auto *Arg = Args.getLastArg(OPT_dynamic_list))
     if (Optional<MemoryBufferRef> Buffer = readFile(Arg->getValue()))
-      parseDynamicList(*Buffer);
+      readDynamicList(*Buffer);
 
   if (auto *Arg = Args.getLastArg(OPT_symbol_ordering_file))
     if (Optional<MemoryBufferRef> Buffer = readFile(Arg->getValue()))
       parseSymbolOrderingList(*Buffer);
 
   for (auto *Arg : Args.filtered(OPT_export_dynamic_symbol))
-    Config->DynamicList.push_back(Arg->getValue());
+    Config->VersionScriptGlobals.push_back(
+        {Arg->getValue(), /*IsExternCpp*/ false, /*HasWildcard*/ false});
+
+  // Dynamic lists are a simplified linker script that doesn't need the
+  // "global:" and implicitly ends with a "local:*". Set the variables needed to
+  // simulate that.
+  if (Args.hasArg(OPT_dynamic_list) || Args.hasArg(OPT_export_dynamic_symbol)) {
+    Config->ExportDynamic = true;
+    if (!Config->Shared)
+      Config->DefaultSymbolVersion = VER_NDX_LOCAL;
+  }
 
   if (auto *Arg = Args.getLastArg(OPT_version_script))
     if (Optional<MemoryBufferRef> Buffer = readFile(Arg->getValue()))
@@ -733,6 +746,16 @@ void LinkerDriver::inferMachineType() {
   error("target emulation unknown: -m or at least one .o file required");
 }
 
+// Parse -z max-page-size=<value>. The default value is defined by
+// each target.
+static uint64_t getMaxPageSize(opt::InputArgList &Args) {
+  uint64_t Val =
+      getZOptionValue(Args, "max-page-size", Target->DefaultMaxPageSize);
+  if (!isPowerOf2_64(Val))
+    error("max-page-size: value isn't a power of 2");
+  return Val;
+}
+
 // Parses -image-base option.
 static uint64_t getImageBase(opt::InputArgList &Args) {
   // Use default if no -image-base option is given.
@@ -748,7 +771,7 @@ static uint64_t getImageBase(opt::InputArgList &Args) {
     error("-image-base: number expected, but got " + S);
     return 0;
   }
-  if ((V % Target->MaxPageSize) != 0)
+  if ((V % Config->MaxPageSize) != 0)
     warn("-image-base: address isn't multiple of page size: " + S);
   return V;
 }
@@ -779,16 +802,14 @@ static std::pair<uint64_t, uint64_t> getSdaBases(opt::InputArgList &Args) {
 template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
   SymbolTable<ELFT> Symtab;
   elf::Symtab<ELFT>::X = &Symtab;
-
-  std::unique_ptr<TargetInfo> TI(createTarget());
-  Target = TI.get();
-  LinkerScript<ELFT> LS;
-  ScriptBase = Script<ELFT>::X = &LS;
+  Target = createTarget();
+  ScriptBase = Script<ELFT>::X = make<LinkerScript<ELFT>>();
 
   Config->Rela =
       ELFT::Is64Bits || Config->EMachine == EM_X86_64 || Config->MipsN32Abi;
   Config->Mips64EL =
       (Config->EMachine == EM_MIPS && Config->EKind == ELF64LEKind);
+  Config->MaxPageSize = getMaxPageSize(Args);
   Config->ImageBase = getImageBase(Args);
   std::tie(Config->SdaBase, Config->Sda2Base) = getSdaBases(Args);
 
@@ -796,47 +817,34 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
   if (Config->OutputFile.empty())
     Config->OutputFile = "a.out";
 
+  // Use default entry point name if no name was given via the command
+  // line nor linker scripts. For some reason, MIPS entry point name is
+  // different from others.
+  Config->WarnMissingEntry = (!Config->Entry.empty() || !Config->Shared);
+  if (Config->Entry.empty() && !Config->Relocatable)
+    Config->Entry = (Config->EMachine == EM_MIPS) ? "__start" : "_start";
+
   // Handle --trace-symbol.
   for (auto *Arg : Args.filtered(OPT_trace_symbol))
     Symtab.trace(Arg->getValue());
 
-  // Initialize Config->MaxPageSize. The default value is defined by
-  // the target, but it can be overriden using the option.
-  Config->MaxPageSize =
-      getZOptionValue(Args, "max-page-size", Target->MaxPageSize);
-  if (!isPowerOf2_64(Config->MaxPageSize))
-    error("max-page-size: value isn't a power of 2");
-
-  // Add all files to the symbol table. After this, the symbol table
-  // contains all known names except a few linker-synthesized symbols.
+  // Add all files to the symbol table. This will add almost all
+  // symbols that we need to the symbol table.
   for (InputFile *F : Files)
     Symtab.addFile(F);
 
-  // Add the start symbol.
-  // It initializes either Config->Entry or Config->EntryAddr.
-  // Note that AMDGPU binaries have no entries.
-  if (!Config->Entry.empty()) {
-    // It is either "-e <addr>" or "-e <symbol>".
-    if (!Config->Entry.getAsInteger(0, Config->EntryAddr))
-      Config->Entry = "";
-  } else if (!Config->Shared && !Config->Relocatable &&
-             Config->EMachine != EM_AMDGPU) {
-    // -e was not specified. Use the default start symbol name
-    // if it is resolvable.
-    Config->Entry = (Config->EMachine == EM_MIPS) ? "__start" : "_start";
-  }
-
-  // If an object file defining the entry symbol is in an archive file,
-  // extract the file now.
+  // If an entry symbol is in a static archive, pull out that file now
+  // to complete the symbol table. After this, no new names except a
+  // few linker-synthesized ones will be added to the symbol table.
   if (Symtab.find(Config->Entry))
     Symtab.addUndefined(Config->Entry);
 
+  // Return if there were name resolution errors.
   if (ErrorCount)
-    return; // There were duplicate symbols or incompatible files
+    return;
 
   Symtab.scanUndefinedFlags();
   Symtab.scanShlibUndefined();
-  Symtab.scanDynamicList();
   Symtab.scanVersionScript();
 
   Symtab.addCombinedLTOObject();
@@ -865,18 +873,15 @@ template <class ELFT> void LinkerDriver::link(opt::InputArgList &Args) {
 
   // MergeInputSection::splitIntoPieces needs to be called before
   // any call of MergeInputSection::getOffset. Do that.
-  auto Fn = [](InputSectionBase<ELFT> *S) {
-    if (!S->Live)
-      return;
-    if (S->Compressed)
-      S->uncompress();
-    if (auto *MS = dyn_cast<MergeInputSection<ELFT>>(S))
-      MS->splitIntoPieces();
-  };
-  if (Config->Threads)
-    parallel_for_each(Symtab.Sections.begin(), Symtab.Sections.end(), Fn);
-  else
-    std::for_each(Symtab.Sections.begin(), Symtab.Sections.end(), Fn);
+  forEach(Symtab.Sections.begin(), Symtab.Sections.end(),
+          [](InputSectionBase<ELFT> *S) {
+            if (!S->Live)
+              return;
+            if (S->Compressed)
+              S->uncompress();
+            if (auto *MS = dyn_cast<MergeInputSection<ELFT>>(S))
+              MS->splitIntoPieces();
+          });
 
   // Write the result to the file.
   writeResult<ELFT>();

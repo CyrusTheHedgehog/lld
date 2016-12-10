@@ -12,9 +12,9 @@
 #include "Error.h"
 #include "InputSection.h"
 #include "LinkerScript.h"
-#include "Memory.h"
 #include "SymbolTable.h"
 #include "Symbols.h"
+#include "lld/Support/Memory.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/CodeGen/Analysis.h"
@@ -58,7 +58,7 @@ template <class ELFT> void elf::ObjectFile<ELFT>::initializeDwarfLine() {
             "createObjectFile failed");
 
   ObjectInfo ObjInfo;
-  DWARFContextInMemory Dwarf(*Obj.get(), &ObjInfo);
+  DWARFContextInMemory Dwarf(*Obj, &ObjInfo);
   DwarfLine.reset(new DWARFDebugLine(&Dwarf.getLineSection().Relocs));
   DataExtractor LineData(Dwarf.getLineSection().Data,
                          ELFT::TargetEndianness == support::little,
@@ -86,12 +86,13 @@ std::string elf::ObjectFile<ELFT>::getLineInfo(InputSectionBase<ELFT> *S,
   // Use fake address calcuated by adding section file offset and offset in
   // section. See comments for ObjectInfo class.
   DILineInfo Info;
-  DILineInfoSpecifier Spec;
-  Tbl->getFileLineInfoForAddress(S->Offset + Offset, nullptr, Spec.FLIKind,
-                                 Info);
+  Tbl->getFileLineInfoForAddress(
+      S->Offset + Offset, nullptr,
+      DILineInfoSpecifier::FileLineInfoKind::AbsoluteFilePath, Info);
   if (Info.Line == 0)
     return "";
-  return Info.FileName + ":" + std::to_string(Info.Line);
+  return convertToUnixPathSeparator(Info.FileName) + ":" +
+         std::to_string(Info.Line);
 }
 
 // Returns "(internal)", "foo.a(bar.o)" or "baz.o".

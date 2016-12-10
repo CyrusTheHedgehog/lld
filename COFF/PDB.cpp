@@ -60,32 +60,72 @@ static SectionChunk *findByName(std::vector<SectionChunk *> &Sections,
   return nullptr;
 }
 
+static ArrayRef<uint8_t> getDebugT(ObjectFile *File) {
+  SectionChunk *Sec = findByName(File->getDebugChunks(), ".debug$T");
+  if (!Sec)
+    return {};
+
+  // First 4 bytes are section magic.
+  ArrayRef<uint8_t> Data = Sec->getContents();
+  if (Data.size() < 4)
+    fatal(".debug$T too short");
+  if (read32le(Data.data()) != COFF::DEBUG_SECTION_MAGIC)
+    fatal(".debug$T has an invalid magic");
+  return Data.slice(4);
+}
+
+static void dumpDebugT(ScopedPrinter &W, ObjectFile *File) {
+  ArrayRef<uint8_t> Data = getDebugT(File);
+  if (Data.empty())
+    return;
+
+  msf::ByteStream Stream(Data);
+  CVTypeDumper TypeDumper(&W, false);
+  if (auto EC = TypeDumper.dump(Data))
+    fatal(EC, "CVTypeDumper::dump failed");
+}
+
+static void dumpDebugS(ScopedPrinter &W, ObjectFile *File) {
+  SectionChunk *Sec = findByName(File->getDebugChunks(), ".debug$S");
+  if (!Sec)
+    return;
+
+  msf::ByteStream Stream(Sec->getContents());
+  CVSymbolArray Symbols;
+  msf::StreamReader Reader(Stream);
+  if (auto EC = Reader.readArray(Symbols, Reader.getLength()))
+    fatal(EC, "StreamReader.readArray<CVSymbolArray> failed");
+
+  CVTypeDumper TypeDumper(&W, false);
+  CVSymbolDumper SymbolDumper(W, TypeDumper, nullptr, false);
+  if (auto EC = SymbolDumper.dump(Symbols))
+    fatal(EC, "CVSymbolDumper::dump failed");
+}
+
 // Dump CodeView debug info. This is for debugging.
 static void dumpCodeView(SymbolTable *Symtab) {
   ScopedPrinter W(outs());
 
   for (ObjectFile *File : Symtab->ObjectFiles) {
-    SectionChunk *DebugT = findByName(File->getDebugChunks(), ".debug$T");
-    if (!DebugT)
+    dumpDebugT(W, File);
+    dumpDebugS(W, File);
+  }
+}
+
+static void addTypeInfo(SymbolTable *Symtab,
+                        pdb::TpiStreamBuilder &TpiBuilder) {
+  for (ObjectFile *File : Symtab->ObjectFiles) {
+    ArrayRef<uint8_t> Data = getDebugT(File);
+    if (Data.empty())
       continue;
 
-    CVTypeDumper TypeDumper(&W, false);
-    if (auto EC = TypeDumper.dump(DebugT->getContents()))
-      fatal(EC, "CVTypeDumper::dump failed");
-
-    SectionChunk *DebugS = findByName(File->getDebugChunks(), ".debug$S");
-    if (!DebugS)
-      continue;
-
-    msf::ByteStream Stream(DebugS->getContents());
-    CVSymbolArray Symbols;
+    msf::ByteStream Stream(Data);
+    codeview::CVTypeArray Records;
     msf::StreamReader Reader(Stream);
-    if (auto EC = Reader.readArray(Symbols, Reader.getLength()))
-      fatal(EC, "StreamReader.readArray<CVSymbolArray> failed");
-
-    CVSymbolDumper SymbolDumper(W, TypeDumper, nullptr, false);
-    if (auto EC = SymbolDumper.dump(Symbols))
-      fatal(EC, "CVSymbolDumper::dump failed");
+    if (auto EC = Reader.readArray(Records, Reader.getLength()))
+      fatal(EC, "Reader.readArray failed");
+    for (const codeview::CVType &Rec : Records)
+      TpiBuilder.addTypeRecord(Rec);
   }
 }
 
@@ -122,6 +162,7 @@ void coff::createPDB(StringRef Path, SymbolTable *Symtab,
   // Add an empty TPI stream.
   auto &TpiBuilder = Builder.getTpiBuilder();
   TpiBuilder.setVersionHeader(pdb::PdbTpiV80);
+  addTypeInfo(Symtab, TpiBuilder);
 
   // Add an empty IPI stream.
   auto &IpiBuilder = Builder.getIpiBuilder();
