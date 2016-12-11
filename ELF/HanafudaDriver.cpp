@@ -14,7 +14,6 @@
 #include "InputFiles.h"
 #include "InputSection.h"
 #include "LinkerScript.h"
-#include "Memory.h"
 #include "OutputSections.h"
 #include "Strings.h"
 #include "SymbolTable.h"
