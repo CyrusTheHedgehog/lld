@@ -6,6 +6,21 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
+//
+// Synthetic sections represent chunks of linker-created data. If you
+// need to create a chunk of data that to be included in some section
+// in the result, you probably want to create it as a synthetic section.
+//
+// In reality, there are a few linker-synthesized chunks that are not
+// of synthetic sections, such as thunks. But we are rewriting them so
+// that eventually they are represented as synthetic sections.
+//
+// Synthetic sections are designed as input sections as opposed to
+// output sections because we want to allow them to be manipulated
+// using linker scripts just like other input sections from regular
+// files.
+//
+//===----------------------------------------------------------------------===//
 
 #ifndef LLD_ELF_SYNTHETIC_SECTION_H
 #define LLD_ELF_SYNTHETIC_SECTION_H
@@ -13,6 +28,7 @@
 #include "GdbIndex.h"
 #include "InputSection.h"
 #include "llvm/ADT/MapVector.h"
+#include "llvm/MC/StringTableBuilder.h"
 
 namespace lld {
 namespace elf {
@@ -124,7 +140,7 @@ public:
 
   uint32_t getTlsIndexOff() const { return TlsIndexOff; }
 
-  unsigned getGp() const;
+  uintX_t getGp() const;
 
 private:
   // MIPS GOT consists of three parts: local, global and tls. Each part
@@ -197,6 +213,25 @@ class GotPltSection final : public SyntheticSection<ELFT> {
 
 public:
   GotPltSection();
+  void addEntry(SymbolBody &Sym);
+  size_t getSize() const override;
+  void writeTo(uint8_t *Buf) override;
+  bool empty() const override { return Entries.empty(); }
+
+private:
+  std::vector<const SymbolBody *> Entries;
+};
+
+// The IgotPltSection is a Got associated with the IpltSection for GNU Ifunc
+// Symbols that will be relocated by Target->IRelativeRel.
+// On most Targets the IgotPltSection will immediately follow the GotPltSection
+// on ARM the IgotPltSection will immediately follow the GotSection.
+template <class ELFT>
+class IgotPltSection final : public SyntheticSection<ELFT> {
+  typedef typename ELFT::uint uintX_t;
+
+public:
+  IgotPltSection();
   void addEntry(SymbolBody &Sym);
   size_t getSize() const override;
   void writeTo(uint8_t *Buf) override;
@@ -346,23 +381,26 @@ public:
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
   size_t getSize() const override { return getNumSymbols() * sizeof(Elf_Sym); }
-  void addSymbol(SymbolBody *Body);
+  void addGlobal(SymbolBody *Body);
+  void addLocal(SymbolBody *Body);
   StringTableSection<ELFT> &getStrTabSec() const { return StrTabSec; }
-  unsigned getNumSymbols() const { return NumLocals + Symbols.size() + 1; }
+  unsigned getNumSymbols() const { return Symbols.size() + 1; }
+  size_t getSymbolIndex(SymbolBody *Body);
 
   ArrayRef<SymbolTableEntry> getSymbols() const { return Symbols; }
 
-  unsigned NumLocals = 0;
-  StringTableSection<ELFT> &StrTabSec;
+  static const OutputSectionBase *getOutputSection(SymbolBody *Sym);
 
 private:
   void writeLocalSymbols(uint8_t *&Buf);
   void writeGlobalSymbols(uint8_t *Buf);
 
-  const OutputSectionBase *getOutputSection(SymbolBody *Sym);
-
   // A vector of symbols and their string table offsets.
   std::vector<SymbolTableEntry> Symbols;
+
+  StringTableSection<ELFT> &StrTabSec;
+
+  unsigned NumLocals = 0;
 };
 
 // Outputs GNU Hash section. For detailed explanation see:
@@ -426,6 +464,23 @@ public:
   size_t getSize() const override;
   void addEntry(SymbolBody &Sym);
   bool empty() const override { return Entries.empty(); }
+  void addSymbols();
+
+private:
+  std::vector<std::pair<const SymbolBody *, unsigned>> Entries;
+};
+
+// The IpltSection is a variant of Plt for recording entries for GNU Ifunc
+// symbols that will be subject to a Target->IRelativeRel
+// The IpltSection immediately follows the Plt section in the Output Section
+template <class ELFT> class IpltSection final : public SyntheticSection<ELFT> {
+public:
+  IpltSection();
+  void writeTo(uint8_t *Buf) override;
+  size_t getSize() const override;
+  void addEntry(SymbolBody &Sym);
+  bool empty() const override { return Entries.empty(); }
+  void addSymbols();
 
 private:
   std::vector<std::pair<const SymbolBody *, unsigned>> Entries;
@@ -445,17 +500,34 @@ public:
   GdbIndexSection();
   void finalize() override;
   void writeTo(uint8_t *Buf) override;
-  size_t getSize() const override { return CuTypesOffset; }
+  size_t getSize() const override;
   bool empty() const override;
 
   // Pairs of [CU Offset, CU length].
   std::vector<std::pair<uintX_t, uintX_t>> CompilationUnits;
+
+  llvm::StringTableBuilder StringPool;
+
+  GdbHashTab SymbolTable;
+
+  // The CU vector portion of the constant pool.
+  std::vector<std::vector<std::pair<uint32_t, uint8_t>>> CuVectors;
+
+  std::vector<AddressEntry<ELFT>> AddressArea;
 
 private:
   void parseDebugSections();
   void readDwarf(InputSection<ELFT> *I);
 
   uint32_t CuTypesOffset;
+  uint32_t SymTabOffset;
+  uint32_t ConstantPoolOffset;
+  uint32_t StringPoolOffset;
+
+  size_t CuVectorsSize = 0;
+  std::vector<size_t> CuVectorsOffset;
+
+  bool Finalized = false;
 };
 
 // --eh-frame-hdr option tells linker to construct a header for all the
@@ -627,12 +699,37 @@ public:
   void writeTo(uint8_t *Buf) override;
 };
 
+// A container for one or more linker generated thunks. Instances of these
+// thunks including ARM interworking and Mips LA25 PI to non-PI thunks.
+template <class ELFT> class ThunkSection : public SyntheticSection<ELFT> {
+public:
+  // ThunkSection in OS, with desired OutSecOff of Off
+  ThunkSection(OutputSectionBase *OS, uint64_t Off);
+
+  // Add a newly created Thunk to this container:
+  // Thunk is given offset from start of this InputSection
+  // Thunk defines a symbol in this InputSection that can be used as target
+  // of a relocation
+  void addThunk(Thunk<ELFT> *T);
+  size_t getSize() const override { return Size; }
+  void writeTo(uint8_t *Buf) override;
+
+private:
+  std::vector<const Thunk<ELFT> *> Thunks;
+  size_t Size = 0;
+};
+
 template <class ELFT> InputSection<ELFT> *createCommonSection();
 template <class ELFT> InputSection<ELFT> *createInterpSection();
 template <class ELFT> MergeInputSection<ELFT> *createCommentSection();
+template <class ELFT>
+SymbolBody *
+addSyntheticLocal(StringRef Name, uint8_t Type, typename ELFT::uint Value,
+                  typename ELFT::uint Size, InputSectionBase<ELFT> *Section);
 
 // Linker generated sections which can be used as inputs.
 template <class ELFT> struct In {
+  static InputSection<ELFT> *ARMAttributes;
   static BuildIdSection<ELFT> *BuildId;
   static InputSection<ELFT> *Common;
   static DynamicSection<ELFT> *Dynamic;
@@ -644,12 +741,15 @@ template <class ELFT> struct In {
   static GotSection<ELFT> *Got;
   static MipsGotSection<ELFT> *MipsGot;
   static GotPltSection<ELFT> *GotPlt;
+  static IgotPltSection<ELFT> *IgotPlt;
   static HashTableSection<ELFT> *HashTab;
   static InputSection<ELFT> *Interp;
   static MipsRldMapSection<ELFT> *MipsRldMap;
   static PltSection<ELFT> *Plt;
+  static IpltSection<ELFT> *Iplt;
   static RelocationSection<ELFT> *RelaDyn;
   static RelocationSection<ELFT> *RelaPlt;
+  static RelocationSection<ELFT> *RelaIplt;
   static StringTableSection<ELFT> *ShStrTab;
   static StringTableSection<ELFT> *StrTab;
   static SymbolTableSection<ELFT> *SymTab;
@@ -658,6 +758,7 @@ template <class ELFT> struct In {
   static VersionNeedSection<ELFT> *VerNeed;
 };
 
+template <class ELFT> InputSection<ELFT> *In<ELFT>::ARMAttributes;
 template <class ELFT> BuildIdSection<ELFT> *In<ELFT>::BuildId;
 template <class ELFT> InputSection<ELFT> *In<ELFT>::Common;
 template <class ELFT> DynamicSection<ELFT> *In<ELFT>::Dynamic;
@@ -669,12 +770,15 @@ template <class ELFT> GnuHashTableSection<ELFT> *In<ELFT>::GnuHashTab;
 template <class ELFT> GotSection<ELFT> *In<ELFT>::Got;
 template <class ELFT> MipsGotSection<ELFT> *In<ELFT>::MipsGot;
 template <class ELFT> GotPltSection<ELFT> *In<ELFT>::GotPlt;
+template <class ELFT> IgotPltSection<ELFT> *In<ELFT>::IgotPlt;
 template <class ELFT> HashTableSection<ELFT> *In<ELFT>::HashTab;
 template <class ELFT> InputSection<ELFT> *In<ELFT>::Interp;
 template <class ELFT> MipsRldMapSection<ELFT> *In<ELFT>::MipsRldMap;
 template <class ELFT> PltSection<ELFT> *In<ELFT>::Plt;
+template <class ELFT> IpltSection<ELFT> *In<ELFT>::Iplt;
 template <class ELFT> RelocationSection<ELFT> *In<ELFT>::RelaDyn;
 template <class ELFT> RelocationSection<ELFT> *In<ELFT>::RelaPlt;
+template <class ELFT> RelocationSection<ELFT> *In<ELFT>::RelaIplt;
 template <class ELFT> StringTableSection<ELFT> *In<ELFT>::ShStrTab;
 template <class ELFT> StringTableSection<ELFT> *In<ELFT>::StrTab;
 template <class ELFT> SymbolTableSection<ELFT> *In<ELFT>::SymTab;

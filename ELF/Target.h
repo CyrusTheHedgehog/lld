@@ -30,6 +30,7 @@ public:
   virtual uint32_t getDynRel(uint32_t Type) const { return Type; }
   virtual void writeGotPltHeader(uint8_t *Buf) const {}
   virtual void writeGotPlt(uint8_t *Buf, const SymbolBody &S) const {};
+  virtual void writeIgotPlt(uint8_t *Buf, const SymbolBody &S) const;
   virtual uint64_t getImplicitAddend(const uint8_t *Buf, uint32_t Type) const;
 
   // If lazy binding is supported, the first entry of the PLT has code
@@ -40,7 +41,8 @@ public:
   virtual void writePlt(uint8_t *Buf, uint64_t GotEntryAddr,
                         uint64_t PltEntryAddr, int32_t Index,
                         unsigned RelOff) const {}
-
+  virtual void addPltHeaderSymbols(InputSectionData *IS) const {}
+  virtual void addPltSymbols(InputSectionData *IS, uint64_t Off) const {}
   // Returns true if a relocation only uses the low bits of a value such that
   // all those bits are in in the same page. For example, if the relocation
   // only uses the low 12 bits in a system with 4k pages. If this is true, the
@@ -49,21 +51,16 @@ public:
   virtual bool usesOnlyLowPageBits(uint32_t Type) const;
 
   // Decide whether a Thunk is needed for the relocation from File
-  // targeting S. Returns one of:
-  // Expr if there is no Thunk required
-  // R_THUNK_ABS if thunk is required and expression is absolute
-  // R_THUNK_PC if thunk is required and expression is pc rel
-  // R_THUNK_PLT_PC if thunk is required to PLT entry and expression is pc rel
-  virtual RelExpr getThunkExpr(RelExpr Expr, uint32_t RelocType,
-                               const InputFile &File,
-                               const SymbolBody &S) const;
+  // targeting S.
+  virtual bool needsThunk(RelExpr Expr, uint32_t RelocType,
+                          const InputFile *File, const SymbolBody &S) const;
   virtual RelExpr getRelExpr(uint32_t Type, const SymbolBody &S) const = 0;
   virtual void relocateOne(uint8_t *Loc, uint32_t Type, uint64_t Val) const = 0;
   virtual ~TargetInfo();
 
   unsigned TlsGdRelaxSkip = 1;
   unsigned PageSize = 4096;
-  unsigned MaxPageSize = 4096;
+  unsigned DefaultMaxPageSize = 4096;
 
   // On FreeBSD x86_64 the first page cannot be mmaped.
   // On Linux that is controled by vm.mmap_min_addr. At least on some x86_64
@@ -103,14 +100,15 @@ public:
   virtual void relaxTlsLdToLe(uint8_t *Loc, uint32_t Type, uint64_t Val) const;
 };
 
-std::string toString(uint32_t RelType);
-
 template <class ELFT>
 uint64_t getPPC64TocBase();
+uint64_t getAArch64Page(uint64_t Expr);
 
 extern TargetInfo *Target;
 TargetInfo *createTarget();
 }
+
+std::string toString(uint32_t RelType);
 }
 
 #endif
