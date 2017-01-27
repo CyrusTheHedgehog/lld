@@ -357,8 +357,8 @@ template <class ELFT> struct ElfSym {
   static DefinedRegular<ELFT> *MipsGp;
 
   // The content for _SDA_BASE_ and _SDA2_BASE_ symbols.
-  static DefinedSynthetic<ELFT> *SdaBase;
-  static DefinedSynthetic<ELFT> *Sda2Base;
+  static DefinedSynthetic *SdaBase;
+  static DefinedSynthetic *Sda2Base;
 };
 
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::EhdrStart;
@@ -371,8 +371,8 @@ template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::End2;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsGpDisp;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsLocalGp;
 template <class ELFT> DefinedRegular<ELFT> *ElfSym<ELFT>::MipsGp;
-template <class ELFT> DefinedSynthetic<ELFT> *ElfSym<ELFT>::SdaBase;
-template <class ELFT> DefinedSynthetic<ELFT> *ElfSym<ELFT>::Sda2Base;
+template <class ELFT> DefinedSynthetic *ElfSym<ELFT>::SdaBase;
+template <class ELFT> DefinedSynthetic *ElfSym<ELFT>::Sda2Base;
 
 // A real symbol object, SymbolBody, is usually stored within a Symbol. There's
 // always one Symbol for each symbol name. The resolver updates the SymbolBody

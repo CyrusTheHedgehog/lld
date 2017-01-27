@@ -733,9 +733,9 @@ template <class ELFT> void Writer<ELFT>::addReservedSymbols() {
     // linker-generated symbols by the C runtime initialization.
     Symbol *Sym;
     Sym = Symtab<ELFT>::X->addSynthetic("_SDA_BASE_", nullptr, 0, STV_HIDDEN);
-    ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic<ELFT>>(Sym->body());
+    ElfSym<ELFT>::SdaBase = cast<DefinedSynthetic>(Sym->body());
     Sym = Symtab<ELFT>::X->addSynthetic("_SDA2_BASE_", nullptr, 0, STV_HIDDEN);
-    ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic<ELFT>>(Sym->body());
+    ElfSym<ELFT>::Sda2Base = cast<DefinedSynthetic>(Sym->body());
   }
 
   // In the assembly for 32 bit x86 the _GLOBAL_OFFSET_TABLE_ symbol
