@@ -801,6 +801,7 @@ void DOLFile::patchTargetAddressRelocations(uint32_t oldAddr, uint32_t newAddr) 
       break;
     }
 
+
     // Perform relocation as normal
     elf::Target->relocateOne(
       const_cast<uint8_t *>(MB.getBuffer().bytes_begin() + P.second.Offset),
@@ -1073,6 +1074,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
       if (!OldSym || OldSym->Section) {
         error("Unable to find original absolute symbol '" +
               P.first() + "' for patching");
+	    
         continue;
       }
 
@@ -1081,7 +1083,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
                            Symtab.find(P.second));
       if (!NewSym) {
         error("Unable to find new symbol '" +
-              P.second + "' for patching");
+              *demangle(P.second) + "' for patching");
         continue;
       }
 
@@ -1115,6 +1117,9 @@ void LinkerDriver::link(opt::InputArgList &Args) {
         SDataSec.Offset = Sec->Offset;
         SDataSec.Addr = Sec->Addr;
         SDataSec.Length = Sec->Size;
+		outs() <<  SDataSec.Length << "\n";
+		outs() << SDataSec.Addr << "\n";
+		outs() <<  SDataSec.Offset << "\n";
       } else if (Sec->getName() == ".sdata2") {
         int SData2SecIdx = DolFile->getUnusedDataSectionIndex();
         if (SData2SecIdx == -1) {
@@ -1153,7 +1158,7 @@ void LinkerDriver::link(opt::InputArgList &Args) {
     // Relocate __ArenaLo and _stack_base
     if (Dot > InitialAddr) {
       uint32_t Delta = (Dot - InitialAddr + 255) & ~255;
-      DolFile->patchForGrowDelta(Delta);
+   //   DolFile->patchForGrowDelta(Delta);
     }
 
     // Write existing .dol buffer first
@@ -1279,10 +1284,10 @@ void LinkerDriver::link(opt::InputArgList &Args) {
       Symtab.Sections.push_back(cast<InputSection<ELFT>>(S));
 
   // Do size optimizations: garbage collection and identical code folding.
-  if (Config->GcSections)
-    markLive<ELFT>();
-  if (Config->ICF)
-    doIcf<ELFT>();
+//  if (Config->GcSections)
+//    markLive<ELFT>();
+//  if (Config->ICF)
+//    doIcf<ELFT>();
 
   // MergeInputSection::splitIntoPieces needs to be called before
   // any call of MergeInputSection::getOffset. Do that.

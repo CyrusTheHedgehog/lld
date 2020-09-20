@@ -216,6 +216,7 @@ Optional<std::string> elf::demangle(StringRef Name) {
   // either a C or C++ symbol. Don't call __cxa_demangle if the name
   // does not look like a C++ symbol name to avoid getting unexpected
   // result for a C symbol that happens to match a mangled type name.
+  error(Name.str());
   if (!Name.startswith("_Z"))
     return None;
 

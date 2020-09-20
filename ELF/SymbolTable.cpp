@@ -320,6 +320,7 @@ Symbol *SymbolTable<ELFT>::addCommon(StringRef N, uint64_t Size,
                                      uint64_t Alignment, uint8_t Binding,
                                      uint8_t StOther, uint8_t Type,
                                      InputFile *File) {
+	
   Symbol *S;
   bool WasInserted;
   std::tie(S, WasInserted) =
@@ -381,6 +382,7 @@ Symbol *SymbolTable<ELFT>::addRegular(StringRef Name, uint8_t StOther,
                                       uint8_t Binding,
                                       InputSectionBase<ELFT> *Section,
                                       InputFile *File) {
+										 																			  
   Symbol *S;
   bool WasInserted;
   std::tie(S, WasInserted) = insert(Name, Type, StOther & 3,
@@ -419,6 +421,7 @@ void SymbolTable<ELFT>::addShared(SharedFile<ELFT> *F, StringRef Name,
   // DSO symbols do not affect visibility in the output, so we pass STV_DEFAULT
   // as the visibility, which will leave the visibility in the symbol table
   // unchanged.
+ 
   Symbol *S;
   bool WasInserted;
   std::tie(S, WasInserted) =
@@ -441,6 +444,8 @@ template <class ELFT>
 Symbol *SymbolTable<ELFT>::addBitcode(StringRef Name, uint8_t Binding,
                                       uint8_t StOther, uint8_t Type,
                                       bool CanOmitFromDynSym, BitcodeFile *F) {
+										  outs() << Name << "\n";
+						  										    
   Symbol *S;
   bool WasInserted;
   std::tie(S, WasInserted) =
@@ -464,6 +469,7 @@ template <class ELFT> SymbolBody *SymbolTable<ELFT>::find(StringRef Name) {
     return nullptr;
   return SymVector[V.Idx]->body();
 }
+
 
 template <class ELFT>
 void SymbolTable<ELFT>::addLazyArchive(ArchiveFile *F,
@@ -497,6 +503,7 @@ void SymbolTable<ELFT>::addLazyArchive(ArchiveFile *F,
 
 template <class ELFT>
 void SymbolTable<ELFT>::addLazyObject(StringRef Name, LazyObjectFile &Obj) {
+
   Symbol *S;
   bool WasInserted;
   std::tie(S, WasInserted) = insert(Name);
